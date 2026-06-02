@@ -159,7 +159,7 @@ def train_uks_dgl_with_curriculum(coords_train, Z_train, X_train, lr=2e-3, lambd
     model_instance = sys.modules['model'].UKSModel(
         in_dim=1,
         flow_hidden_dim=flow_hidden,
-        num_flow_layers=2,
+        num_flow_layers=4,
         embed_dim=16,
         rff_sigma=10.0,
         kernel_hidden_dim=kernel_hidden,
@@ -177,29 +177,28 @@ def train_uks_dgl_with_curriculum(coords_train, Z_train, X_train, lr=2e-3, lambd
     )
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=30, T_mult=2, eta_min=1e-5)
     
-    num_epochs = 150
+    num_epochs = 250
     batch_size = 64
     num_samples = 200
     n_obs_points = 180
     
-    patience = 20
+    patience = 35
     best_loss = float('inf')
     best_model_state = None
     patience_counter = 0
     
-    # 抽取含有协变量的自监督训练数据
-    u_obs_np, z_obs_np, u_pred_np, z_pred_np, x_obs_np, x_pred_np = make_self_supervised_dataset(
-        coords_train, Z_train, X_train, num_samples, n_obs_points=n_obs_points
-    )
-    
-    u_obs = torch.tensor(u_obs_np, dtype=dtype, device=device)   # [S, N_obs, 2]
-    z_obs = torch.tensor(z_obs_np, dtype=dtype, device=device)   # [S, N_obs, 1]
-    u_pred = torch.tensor(u_pred_np, dtype=dtype, device=device) # [S, 1, 2]
-    z_pred = torch.tensor(z_pred_np, dtype=dtype, device=device) # [S, 1, 1]
-    x_obs = torch.tensor(x_obs_np, dtype=dtype, device=device)   # [S, N_obs, 2]
-    x_pred = torch.tensor(x_pred_np, dtype=dtype, device=device) # [S, 1, 2]
-    
     for epoch in range(1, num_epochs + 1):
+        # 动态随机多掩码空间自监督增强：在每个 epoch 开始前重新随机生成掩码划分，提升模型在几何拓扑位置上的泛化力
+        u_obs_np, z_obs_np, u_pred_np, z_pred_np, x_obs_np, x_pred_np = make_self_supervised_dataset(
+            coords_train, Z_train, X_train, num_samples, n_obs_points=n_obs_points
+        )
+        u_obs = torch.tensor(u_obs_np, dtype=dtype, device=device)   # [S, N_obs, 2]
+        z_obs = torch.tensor(z_obs_np, dtype=dtype, device=device)   # [S, N_obs, 1]
+        u_pred = torch.tensor(u_pred_np, dtype=dtype, device=device) # [S, 1, 2]
+        z_pred = torch.tensor(z_pred_np, dtype=dtype, device=device) # [S, 1, 1]
+        x_obs = torch.tensor(x_obs_np, dtype=dtype, device=device)   # [S, N_obs, 2]
+        x_pred = torch.tensor(x_pred_np, dtype=dtype, device=device) # [S, 1, 2]
+        
         model_instance.train()
         indices = torch.randperm(num_samples, device=device)
         num_batches = num_samples // batch_size
@@ -308,7 +307,7 @@ def run_git_checkpoint(output_dir, metrics_summary):
         d1_r2 = checkpoint_entry["final_metrics"]["D1_R2"]
         d2_r2 = checkpoint_entry["final_metrics"]["D2_R2"]
         d3_r2 = checkpoint_entry["final_metrics"]["D3_R2"]
-        commit_msg = f"Exp: Run 6收官 | 三场景 R2: [D1={d1_r2:.3f}, D2={d2_r2:.3f}, D3={d3_r2:.3f}] | 自动指标归档"
+        commit_msg = f"Exp: Run 7收官 | 三场景 R2: [D1={d1_r2:.3f}, D2={d2_r2:.3f}, D3={d3_r2:.3f}] | 自动指标归档"
         subprocess.run(["git", "commit", "-m", commit_msg])
         print(f"--> [Git 审计] 成功自动 Commit 版本, 提交信息: \"{commit_msg}\"")
     except Exception as e:
@@ -317,11 +316,11 @@ def run_git_checkpoint(output_dir, metrics_summary):
 def main():
     init_gitignore()
     
-    output_dir = "results_20260602_run6"
+    output_dir = "results_20260602_run7"
     os.makedirs(output_dir, exist_ok=True)
     
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    print(f"--> [初始化] UKS-DGL 第六轮主实验启动，设备: {device}")
+    print(f"--> [初始化] UKS-DGL 第七轮主实验启动，设备: {device}")
     dtype = torch.float32
     
     # 1. 定义三场景超参数寻优空间 (3 组参数组合候选)
@@ -542,7 +541,7 @@ def main():
             V_adj_T_V_reg = V_adj_T_V + 1e-6 * eye_M
             L_V_adj = torch.linalg.cholesky(V_adj_T_V_reg.cpu()).to(device)
             
-            g_Lambda = torch.ones((1, 200, 1), dtype=dtype, device=device)
+            g_Lambda = c_0
             w_adj = torch.linalg.solve_triangular(L_adj, g_Lambda, upper=False)
             rhs_lambda_F = torch.bmm(V_adj_T, w_adj)
             lambda_F_temp = torch.linalg.solve_triangular(L_V_adj, rhs_lambda_F, upper=False)

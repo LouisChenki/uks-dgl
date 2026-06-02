@@ -154,6 +154,10 @@ def compute_joint_losses(
     计算空间神经网络统一克里金系统 (UKS-DGL) 的联合损失函数。
     集成空间自监督重构 Pred 损失、UKS 结构对数似然损失、Flow 雅可比体积损失以及 Hessian 拓扑几何损失。
     """
+    # 空间坐标抖动数据增强：在训练前向时对观测点坐标加入微弱的高斯噪声，防止 SCE 网络过分对地理位置硬性记忆
+    if model.training:
+        U_obs = U_obs + torch.randn_like(U_obs) * 0.008
+
     B, N, D_in = Z_obs.shape
 
     # 1. 运行模型前向传播，计算预测值及高斯流隐变量
@@ -217,7 +221,10 @@ def compute_joint_losses(
         only_inputs=True
     )[0][:, 0, 1]  # [B]
     
-    loss_geo = torch.mean(grad_xx ** 2 + grad_yy ** 2)
+    loss_geo_raw = torch.mean(grad_xx ** 2 + grad_yy ** 2)
+    # 几何正则退火权重调度：阶段 3 (epoch > 120) 微调时将几何正则权重退火衰减至 10%，释放局部核函数的各向异性自由度
+    geo_anneal_factor = 0.1 if epoch > 120 else 1.0
+    loss_geo = geo_anneal_factor * loss_geo_raw
 
     # 5. 课程学习 (Curriculum Learning) 掩码计算
     mask = get_curriculum_loss_mask(epoch)  # [4]

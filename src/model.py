@@ -174,18 +174,28 @@ class SpectralCoordinateEmbedding(nn.Module):
 class AdaptiveKernelNetwork(nn.Module):
     """
     显式马氏自适应核网络 (Local Adaptive Mahalanobis Anisotropy Kernel Network)。
-    通过谱特征，使用 MLP 预测每个点的局部各向异性几何参数：旋转角 theta, 主轴长度 l_1, 次轴长度 l_2。
-    利用马氏距离公式对称化计算两点间的自适应非平稳协方差，并在长度尺度上采用 Sigmoid 平滑截断以规避对角奇异化。
+    通过谱特征，使用带残差连接的两层 MLP 预测每个点的局部各向异性几何参数：旋转角 theta, 主轴长度 l_1, 次轴长度 l_2。
     """
-    def __init__(self, embed_dim=16, hidden_dim=32):
+    def __init__(self, embed_dim=16, hidden_dim=64):
         super().__init__()
-        # 输出 3 个标量参数：t(旋转相关), p1(主轴相关), p2(次轴相关)
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
+        # 增加一个线性投影，使残差输入维度对齐
+        self.proj_in = nn.Linear(embed_dim, hidden_dim)
+        
+        # 第一层隐藏层
+        self.layer1 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
-            nn.Dropout(p=DROPOUT_P),
-            nn.Linear(hidden_dim, 3)
+            nn.Dropout(p=DROPOUT_P)
         )
+        # 第二层隐藏层
+        self.layer2 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(p=DROPOUT_P)
+        )
+        # 输出层，输出 3 个标量参数：t(旋转相关), p1(主轴相关), p2(次轴相关)
+        self.out_layer = nn.Linear(hidden_dim, 3)
+        
         # 可学习的协方差边际尺度 log_sigma_f (Log-scale)
         self.log_sigma_f = nn.Parameter(torch.tensor(0.0))
 
@@ -195,7 +205,13 @@ class AdaptiveKernelNetwork(nn.Module):
         H: [B, N, embed_dim]
         返回 G: [B, N, 2, 2]
         """
-        params = self.mlp(H)  # [B, N, 3]
+        h = self.proj_in(H) # [B, N, hidden_dim]
+        # 残差 1
+        h = h + self.layer1(h)
+        # 残差 2
+        h = h + self.layer2(h)
+        
+        params = self.out_layer(h)  # [B, N, 3]
         t = params[:, :, 0]   # [B, N]
         p1 = params[:, :, 1]  # [B, N]
         p2 = params[:, :, 2]  # [B, N]
@@ -282,15 +298,62 @@ class AdaptiveKernelNetwork(nn.Module):
         return C, c_0
 
 
+class KANTrendNetwork(nn.Module):
+    """
+    轻量级自适应一维 Cubic B-spline 样条趋势变换网络。
+    利用 PyTorch 张量操作，分段插值计算三次样条基函数。
+    """
+    def __init__(self, in_features=4, out_features=4, grid_size=5, grid_min=-3.0, grid_max=3.0):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.grid_size = grid_size
+        
+        # 均匀分布的网格中心点 (knots)
+        knots = torch.linspace(grid_min, grid_max, grid_size)
+        self.register_buffer('knots', knots)
+        self.step = (grid_max - grid_min) / (grid_size - 1)
+        
+        # B-spline 后的线性混合层：将 [B, N, in_features * grid_size] 映射为 [B, N, out_features]
+        self.proj = nn.Linear(in_features * grid_size, out_features)
+        
+    def forward(self, z):
+        # z: [B, N, D_in]
+        B, N, D = z.shape
+        
+        # 广播计算相对距离 z_diff: [B, N, D, grid_size]
+        z_expanded = z.unsqueeze(-1)  # [B, N, D, 1]
+        knots_expanded = self.knots.view(1, 1, 1, -1)  # [1, 1, 1, grid_size]
+        
+        dist = (z_expanded - knots_expanded) / self.step # [B, N, D, grid_size]
+        abs_dist = torch.abs(dist)
+        
+        # 计算均匀三次 B-样条基函数
+        b_val = torch.zeros_like(dist)
+        mask1 = (abs_dist < 1.0)
+        mask2 = (abs_dist >= 1.0) & (abs_dist < 2.0)
+        
+        # 三次 B-样条解析式：在 0-1 之间与 1-2 之间分段
+        b_val = torch.where(mask1, 2.0/3.0 - abs_dist**2 + 0.5 * abs_dist**3, b_val)
+        b_val = torch.where(mask2, (2.0 - abs_dist)**3 / 6.0, b_val) # [B, N, D, grid_size]
+        
+        # 展平特征 [B, N, D * grid_size]
+        features = b_val.view(B, N, D * self.grid_size)
+        
+        # 线性混合投影得到最终的趋势特征基
+        out = self.proj(features) # [B, N, out_features]
+        return out
+
+
 class UKSModel(nn.Module):
     """
     统一克里金系统 (Unified Kriging System, UKS) 完整神经网络。
     集成了物理可逆高斯化流 (RealNVP)、谱嵌入 (SCE)、自适应马氏核 (AKN) 以及克里金求解算子。
     支持接收外部协变量作为大尺度全局趋势解耦的物理基底 (KED)。
     """
-    def __init__(self, in_dim=1, flow_hidden_dim=32, num_flow_layers=2,
+    def __init__(self, in_dim=1, flow_hidden_dim=64, num_flow_layers=4,
                  embed_dim=16, rff_sigma=10.0,
-                 kernel_hidden_dim=32, latent_dim=8, eps=None, cov_dim=2):
+                 kernel_hidden_dim=64, latent_dim=8, eps=None, cov_dim=2):
         super().__init__()
         self.in_dim = in_dim
         self.eps = eps if eps is not None else NUGGET_EPS
@@ -303,25 +366,20 @@ class UKSModel(nn.Module):
         # 谱特征映射为局部协方差椭圆参数，由 AKN 接收计算
         self.kernel = AdaptiveKernelNetwork(embed_dim=embed_dim, hidden_dim=kernel_hidden_dim)
 
+        # 自适应低频光滑 KAN 趋势网络 (Cubic B-spline)
+        self.trend_net = KANTrendNetwork(in_features=4, out_features=4)
+
     def get_trend_matrix(self, coords, X_cov):
         """
-        提取外部协变量辅助趋势基矩阵，采用光滑的多变量二次多项式展开
-        F = [1, u_x, u_y, X_1, X_2, X_1^2, X_2^2, X_1*X_2]
-        coords: [B, N, 2]
-        X_cov: [B, N, D_x]
-        返回 F: [B, N, 8]
+        提取外部协变量辅助趋势基矩阵，采用光滑 KAN (Cubic B-spline) 特征展开
+        z = [u_x, u_y, X_1, X_2]
+        返回 F = [1, KAN_1, KAN_2, KAN_3, KAN_4]，维度为 [B, N, 5]
         """
-        u_x = coords[:, :, 0:1]           # [B, N, 1]
-        u_y = coords[:, :, 1:2]           # [B, N, 1]
-        ones = torch.ones_like(u_x)       # [B, N, 1]
-        
-        X1 = X_cov[:, :, 0:1]             # [B, N, 1]
-        X2 = X_cov[:, :, 1:2]             # [B, N, 1]
-        X1_sq = X1 ** 2                   # [B, N, 1]
-        X2_sq = X2 ** 2                   # [B, N, 1]
-        X12 = X1 * X2                     # [B, N, 1]
-        
-        F = torch.cat([ones, u_x, u_y, X1, X2, X1_sq, X2_sq, X12], dim=-1)  # [B, N, 8]
+        B, N, _ = coords.shape
+        z = torch.cat([coords, X_cov], dim=-1) # [B, N, 4]
+        F_features = self.trend_net(z)         # [B, N, 4]
+        ones = torch.ones((B, N, 1), dtype=coords.dtype, device=coords.device)
+        F = torch.cat([ones, F_features], dim=-1) # [B, N, 5]
         return F
 
     def forward(self, Z_obs, U_obs, U_pred, X_obs, X_pred, Z_pred=None):
