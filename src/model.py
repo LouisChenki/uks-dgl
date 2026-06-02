@@ -13,10 +13,10 @@ from uks_solver import UKSSolverOp
 # ==========================================
 # MODEL CONFIGURATION (模型物理结构参数配置区)
 # ==========================================
-FLOW_HIDDEN_DIM = 32
-KERNEL_HIDDEN_DIM = 32
-DROPOUT_P = 0.1
-NUGGET_EPS = 1.0e-05
+FLOW_HIDDEN_DIM = 64
+KERNEL_HIDDEN_DIM = 64
+DROPOUT_P = 0.15
+NUGGET_EPS = 5.0e-05
 # ==========================================
 
 class CouplingLayer(nn.Module):

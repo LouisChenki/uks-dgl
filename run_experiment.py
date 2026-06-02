@@ -239,6 +239,11 @@ def train_uks_dgl_with_curriculum(coords_train, Z_train, X_train, lr=2e-3, lambd
         scheduler.step()
         avg_loss = epoch_loss / num_batches
         
+        # 阶段切换点防御性重置：在阶段 2 (epoch 51) 和阶段 3 (epoch 121) 开启时重置早停计数，避免 Loss 数值跳变引发 spurious 早停
+        if epoch == 51 or epoch == 121:
+            best_loss = float('inf')
+            patience_counter = 0
+        
         if avg_loss < best_loss:
             best_loss = avg_loss
             best_model_state = {k: v.cpu().clone() for k, v in model_instance.state_dict().items()}
