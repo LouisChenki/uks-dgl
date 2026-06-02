@@ -518,10 +518,18 @@ def main():
             C_reg = C + uks_model.eps * torch.eye(200, device=device).unsqueeze(0)
             
             C_reg_cpu = C_reg.cpu()
-            try:
-                L = torch.linalg.cholesky(C_reg_cpu).to(device)
-            except torch._C._LinAlgError:
-                L = torch.linalg.cholesky(C_reg_cpu + 1e-4 * torch.eye(200).unsqueeze(0)).to(device)
+            L_cpu = None
+            eye_200_cpu = torch.eye(200, dtype=torch.float32).unsqueeze(0)
+            fallback_nugget = 1.0e-06
+            for _ in range(12):
+                try:
+                    L_cpu = torch.linalg.cholesky(C_reg_cpu + fallback_nugget * eye_200_cpu)
+                    break
+                except torch._C._LinAlgError:
+                    fallback_nugget *= 5.0
+            if L_cpu is None:
+                raise torch._C._LinAlgError("大尺度趋势解耦分析中，C_reg 矩阵的自适应 Cholesky 分解在 12 次加噪尝试后仍失败。")
+            L = L_cpu.to(device)
                 
             F = uks_model.get_trend_matrix(U_obs_eval[0:1], X_obs_eval[0:1])
             V = torch.linalg.solve_triangular(L, F, upper=False)
