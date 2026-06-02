@@ -1,0 +1,12 @@
+# 自动生成 - 忽略所有 markdown 学术总结与说明性文本报告
+*.md
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+
+# 允许追踪的核心白名单
+!*.py
+!*.npz
+!*.pth
+!*.png
