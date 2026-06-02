@@ -25,5 +25,32 @@
             "D2_R2": 0.6189698527060422,
             "D3_R2": 0.6390649507620387
         }
+    },
+    {
+        "git_commit_hash": "c6ebd0f6a9952474a4b8dac53c871cfbacb245ea",
+        "timestamp": "2026-06-02T09:20:14",
+        "tuning_details": {
+            "iteration": 3,
+            "params": {
+                "lr": 0.0025,
+                "flow_hidden_dim": 32,
+                "kernel_hidden_dim": 32,
+                "dropout_p": 0.05,
+                "nugget_eps": 1e-06,
+                "lambda_flow": 0.008,
+                "lambda_geo": 5e-05
+            },
+            "mean_r2": 0.2892250976610982,
+            "r2_details": [
+                0.35655187479465467,
+                0.15037697555747953,
+                0.3607464426311605
+            ]
+        },
+        "final_metrics": {
+            "D1_R2": 0.35798208416362787,
+            "D2_R2": 0.26097952956671155,
+            "D3_R2": 0.15715532122785125
+        }
     }
 ]

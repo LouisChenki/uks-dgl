@@ -22,25 +22,29 @@ class HomoscedasticLossWeighting(nn.Module):
         # 初始化 4 个对数噪声参数为 0.0 (即初始化各任务 sigma_i^2 = 1.0)
         self.log_vars = nn.Parameter(torch.zeros(4, dtype=torch.float32))
 
-    def forward(self, loss_pred, loss_uks, loss_flow, loss_geo):
+    def forward(self, loss_pred, loss_uks, loss_flow, loss_geo, mask):
         """
-        计算多任务自适应加权总损失:
-        L_Total = 1/(2*sigma^2) * L_task + log(sigma)
+        计算多任务自适应同方差加权总损失。
+        通过 mask 控制各项的参与：如果 mask[i] == 0.0，则不计入该子损失和对应的对数惩罚项，以防止梯度空转。
         """
-        # 为保证方差的正定性，使用对数指数变换
-        w0 = torch.exp(-self.log_vars[0])
-        w1 = torch.exp(-self.log_vars[1])
-        w2 = torch.exp(-self.log_vars[2])
-        w3 = torch.exp(-self.log_vars[3])
-
-        # 惩罚项 log(sigma_1 * sigma_2 * sigma_3 * sigma_4) = 0.5 * sum(log_vars)
-        log_term = 0.5 * torch.sum(self.log_vars)
-
-        loss_total = (0.5 * w0 * loss_pred + 
-                      0.5 * w1 * loss_uks + 
-                      0.5 * w2 * loss_flow + 
-                      0.5 * w3 * loss_geo + 
-                      log_term)
+        loss_total = 0.0
+        
+        # 1. pred 任务
+        if mask[0] > 0.0:
+            loss_total = loss_total + 0.5 * torch.exp(-self.log_vars[0]) * loss_pred + 0.5 * self.log_vars[0]
+            
+        # 2. uks 任务
+        if mask[1] > 0.0:
+            loss_total = loss_total + 0.5 * torch.exp(-self.log_vars[1]) * loss_uks + 0.5 * self.log_vars[1]
+            
+        # 3. flow 任务
+        if mask[2] > 0.0:
+            loss_total = loss_total + 0.5 * torch.exp(-self.log_vars[2]) * loss_flow + 0.5 * self.log_vars[2]
+            
+        # 4. geo 任务
+        if mask[3] > 0.0:
+            loss_total = loss_total + 0.5 * torch.exp(-self.log_vars[3]) * loss_geo + 0.5 * self.log_vars[3]
+            
         return loss_total
 
 
@@ -218,19 +222,16 @@ def compute_joint_losses(
     # 5. 课程学习 (Curriculum Learning) 掩码计算
     mask = get_curriculum_loss_mask(epoch)  # [4]
     
-    # 应用掩码限制梯度的反向传导
-    l_pred_m = loss_pred * mask[0]
-    l_uks_m = loss_uks * mask[1]
-    l_flow_m = loss_flow * mask[2]
-    l_geo_m = loss_geo * mask[3]
-
     # 6. 自适应同方差不确定性加权与总损失汇总
-    if epoch > 120 and loss_weighting_layer is not None:
-        # 第三阶段: 使用可学习的同方差加权层融合损失
-        loss_total = loss_weighting_layer(l_pred_m, l_uks_m, l_flow_m, l_geo_m)
+    if loss_weighting_layer is not None:
+        # 全周期自适应多任务不确定性加权（根据课程学习掩码进行平滑自适应）
+        loss_total = loss_weighting_layer(loss_pred, loss_uks, loss_flow, loss_geo, mask)
     else:
-        # 第一和第二阶段: 使用基础静态超参权重累加
-        loss_total = l_pred_m + lambda_flow * l_flow_m + lambda_geo * l_geo_m + 0.1 * l_uks_m
+        # 无自适应加权层时的备用静态超参权重累加
+        loss_total = (loss_pred * mask[0] + 
+                      lambda_flow * loss_flow * mask[2] + 
+                      lambda_geo * loss_geo * mask[3] + 
+                      0.1 * loss_uks * mask[1])
 
     return loss_total, loss_pred, loss_flow, loss_geo, loss_uks
 

@@ -312,11 +312,11 @@ def run_git_checkpoint(output_dir, metrics_summary):
 def main():
     init_gitignore()
     
-    output_dir = "results_20260602_run4"
+    output_dir = "results_20260602_run5"
     os.makedirs(output_dir, exist_ok=True)
     
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    print(f"--> [初始化] UKS-DGL 第四轮主实验启动，设备: {device}")
+    print(f"--> [初始化] UKS-DGL 第五轮主实验启动，设备: {device}")
     dtype = torch.float32
     
     # 1. 定义三场景超参数寻优空间 (3 组参数组合候选)
@@ -498,16 +498,29 @@ def main():
             print("--> [梯度提取] 正在提取最难场景 D3 下测试点 u0 的伴随状态变量...")
             u0_coords = coords_test[0:1]
             U_pred_u0 = torch.tensor(u0_coords, dtype=dtype, device=device).unsqueeze(1)
-            U_pred_u0.requires_grad = True
             
-            # 前向
-            Z_hat_u0 = uks_model(Z_obs_eval[0:1, :, 0:1], U_obs_eval[0:1], U_pred_u0, X_obs_eval[0:1], X_pred_eval[0:1])
+            # 隐高斯空间前向克里金求解，消除 RealNVP 非线性逆流雅可比扭曲的影响
+            Z_obs_flow = torch.cat([Z_obs_eval[0:1, :, 0:1], torch.zeros_like(Z_obs_eval[0:1, :, 0:1])], dim=-1)
+            with torch.no_grad():
+                Y_obs_flow, _ = uks_model.flow(Z_obs_flow)
+                
+            H_obs = uks_model.sce(U_obs_eval[0:1])
+            H_pred_u0 = uks_model.sce(U_pred_u0)
+            C, c_0 = uks_model.kernel(H_obs, H_pred_u0, U_obs_eval[0:1], U_pred_u0)
+            
+            F = uks_model.get_trend_matrix(U_obs_eval[0:1], X_obs_eval[0:1])
+            f_0 = uks_model.get_trend_matrix(U_pred_u0, X_pred_eval[0:1]).transpose(-2, -1)
+            
+            Y_hat_u0 = UKSSolverOp.apply(C, F, c_0, f_0, Y_obs_flow, uks_model.eps)
             Lambda_u0 = UKSSolverOp.saved_weights['Lambda'].float().cpu().numpy().flatten()
             
-            # 反向求导伴随
+            # 对隐估计值 Y_hat_u0 物理通道发起求导起点，以恢复纯粹几何传导算子 C^-1 的物理自伴随对齐
+            grad_Y_hat = torch.zeros_like(Y_hat_u0)
+            grad_Y_hat[:, :, 0] = 1.0
+            
             if 'lambda_C' in UKSSolverOp.saved_weights:
                 del UKSSolverOp.saved_weights['lambda_C']
-            Z_hat_u0.backward(torch.ones_like(Z_hat_u0))
+            Y_hat_u0.backward(grad_Y_hat)
             lambda_C_u0 = UKSSolverOp.saved_weights['lambda_C'].float().cpu().numpy().flatten()
             
         # 3.7 计算大尺度趋势解耦与自适应椭圆核数据 (以备图 4、图 7 可视化使用)

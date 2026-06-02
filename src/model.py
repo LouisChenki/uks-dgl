@@ -13,10 +13,10 @@ from uks_solver import UKSSolverOp
 # ==========================================
 # MODEL CONFIGURATION (模型物理结构参数配置区)
 # ==========================================
-FLOW_HIDDEN_DIM = 64
-KERNEL_HIDDEN_DIM = 64
-DROPOUT_P = 0.15
-NUGGET_EPS = 5.0e-05
+FLOW_HIDDEN_DIM = 32
+KERNEL_HIDDEN_DIM = 32
+DROPOUT_P = 0.1
+NUGGET_EPS = 1.0e-05
 # ==========================================
 
 class CouplingLayer(nn.Module):
@@ -203,11 +203,10 @@ class AdaptiveKernelNetwork(nn.Module):
         # 1. 各向异性主方向旋转角估计 theta = pi * tanh(t)
         theta = math.pi * torch.tanh(t)  # [B, N]
 
-        # 2. 长度尺度 l_1 和 l_2 平滑有界映射，防止协方差对角化退化
-        # 主轴相关长度限制在 [0.08, 0.50] 之间
-        l1 = 0.08 + (0.50 - 0.08) * torch.sigmoid(p1)  # [B, N]
-        # 次轴相关长度限制在 [0.03, 0.20] 之间 (强制强各向异性)
-        l2 = 0.03 + (0.20 - 0.03) * torch.sigmoid(p2)  # [B, N]
+        # 2. 长度尺度 l_1 和 l_2 平滑有界映射，放宽限制以支持自适应退化为各向同性
+        # 长轴与短轴均允许在 [0.05, 0.60] 范围内，对称解耦
+        l1 = 0.05 + (0.60 - 0.05) * torch.sigmoid(p1)  # [B, N]
+        l2 = 0.05 + (0.60 - 0.05) * torch.sigmoid(p2)  # [B, N]
 
         # 3. 构造局部旋转与拉伸度量矩阵
         cos_t = torch.cos(theta)  # [B, N]
@@ -282,16 +281,39 @@ class AdaptiveKernelNetwork(nn.Module):
 
         return C, c_0
 
+class TrendProjectionNetwork(nn.Module):
+    """
+    自适应高维非线性趋势投影网络。
+    输入 2D 坐标与外部协变量，映射为具有克里金无偏约束常数项 1 的非线性大尺度均值趋势基。
+    """
+    def __init__(self, in_features=4, out_features=5, hidden_dim=32):
+        super().__init__()
+        # out_features - 1 维用于学习非线性基特征，剩余 1 维放置常数项 1
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(p=DROPOUT_P),
+            nn.Linear(hidden_dim, out_features - 1)
+        )
+
+    def forward(self, coords, X_cov):
+        # 维度追踪: [B, N, 2] concat [B, N, Dx] -> [B, N, 2 + Dx]
+        inputs = torch.cat([coords, X_cov], dim=-1)
+        h = self.mlp(inputs)  # [B, N, out_features - 1]
+        ones = torch.ones_like(coords[:, :, 0:1])  # [B, N, 1]
+        F = torch.cat([ones, h], dim=-1)  # [B, N, out_features]
+        return F
+
 
 class UKSModel(nn.Module):
     """
     统一克里金系统 (Unified Kriging System, UKS) 完整神经网络。
-    集成了物理可逆高斯化流 (RealNVP)、谱嵌入 (SCE)、自适应马氏核 (AKN)、趋势项基以及克里金求解算子。
+    集成了物理可逆高斯化流 (RealNVP)、谱嵌入 (SCE)、自适应马氏核 (AKN)、非线性趋势投影网络以及克里金求解算子。
     支持接收外部协变量作为大尺度全局趋势解耦的物理基底 (KED)。
     """
     def __init__(self, in_dim=1, flow_hidden_dim=32, num_flow_layers=2,
                  embed_dim=16, rff_sigma=10.0,
-                 kernel_hidden_dim=32, latent_dim=8, eps=None):
+                 kernel_hidden_dim=32, latent_dim=8, eps=None, cov_dim=2):
         super().__init__()
         self.in_dim = in_dim
         self.eps = eps if eps is not None else NUGGET_EPS
@@ -304,18 +326,17 @@ class UKSModel(nn.Module):
         # 谱特征映射为局部协方差椭圆参数，由 AKN 接收计算
         self.kernel = AdaptiveKernelNetwork(embed_dim=embed_dim, hidden_dim=kernel_hidden_dim)
 
+        # 实例化趋势投影网络，输入为 2D 坐标 + 外部协变量，输出 5 维自适应非线性趋势基
+        self.trend_net = TrendProjectionNetwork(in_features=2 + cov_dim, out_features=5, hidden_dim=32)
+
     def get_trend_matrix(self, coords, X_cov):
         """
-        提取外部协变量辅助趋势基矩阵 F = [1, u_x, u_y, X_1, X_2]
+        通过趋势投影网络自适应提取非线性趋势基矩阵
         coords: [B, N, 2]
         X_cov: [B, N, D_x]
-        返回 F: [B, N, 3 + D_x]
+        返回 F: [B, N, 5]
         """
-        u_x = coords[:, :, 0:1]           # [B, N, 1]
-        u_y = coords[:, :, 1:2]           # [B, N, 1]
-        ones = torch.ones_like(u_x)       # [B, N, 1]
-        F = torch.cat([ones, u_x, u_y, X_cov], dim=-1)  # [B, N, 3 + D_x]
-        return F
+        return self.trend_net(coords, X_cov)
 
     def forward(self, Z_obs, U_obs, U_pred, X_obs, X_pred, Z_pred=None):
         """
