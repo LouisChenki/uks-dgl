@@ -303,7 +303,7 @@ def run_git_checkpoint(output_dir, metrics_summary):
         d1_r2 = checkpoint_entry["final_metrics"]["D1_R2"]
         d2_r2 = checkpoint_entry["final_metrics"]["D2_R2"]
         d3_r2 = checkpoint_entry["final_metrics"]["D3_R2"]
-        commit_msg = f"Exp: Run 4收官 | 三场景 R2: [D1={d1_r2:.3f}, D2={d2_r2:.3f}, D3={d3_r2:.3f}] | 自动指标归档"
+        commit_msg = f"Exp: Run 6收官 | 三场景 R2: [D1={d1_r2:.3f}, D2={d2_r2:.3f}, D3={d3_r2:.3f}] | 自动指标归档"
         subprocess.run(["git", "commit", "-m", commit_msg])
         print(f"--> [Git 审计] 成功自动 Commit 版本, 提交信息: \"{commit_msg}\"")
     except Exception as e:
@@ -312,11 +312,11 @@ def run_git_checkpoint(output_dir, metrics_summary):
 def main():
     init_gitignore()
     
-    output_dir = "results_20260602_run5"
+    output_dir = "results_20260602_run6"
     os.makedirs(output_dir, exist_ok=True)
     
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    print(f"--> [初始化] UKS-DGL 第五轮主实验启动，设备: {device}")
+    print(f"--> [初始化] UKS-DGL 第六轮主实验启动，设备: {device}")
     dtype = torch.float32
     
     # 1. 定义三场景超参数寻优空间 (3 组参数组合候选)
@@ -512,16 +512,42 @@ def main():
             f_0 = uks_model.get_trend_matrix(U_pred_u0, X_pred_eval[0:1]).transpose(-2, -1)
             
             Y_hat_u0 = UKSSolverOp.apply(C, F, c_0, f_0, Y_obs_flow, uks_model.eps)
-            Lambda_u0 = UKSSolverOp.saved_weights['Lambda'].float().cpu().numpy().flatten()
+            Lambda_u0 = UKSSolverOp.saved_weights['Lambda'].detach().cpu().numpy().flatten()
             
-            # 对隐估计值 Y_hat_u0 物理通道发起求导起点，以恢复纯粹几何传导算子 C^-1 的物理自伴随对齐
-            grad_Y_hat = torch.zeros_like(Y_hat_u0)
-            grad_Y_hat[:, :, 0] = 1.0
+            # 手动求解几何自伴随方程 K * [lambda_C; lambda_F] = [1; 0]，以排除已知点隐变量 Y_obs_flow 的高频随机白噪声干扰
+            C_reg = C + uks_model.eps * torch.eye(200, device=device).unsqueeze(0)
+            C_reg_cpu = C_reg.cpu()
+            L_cpu = None
+            eye_200_cpu = torch.eye(200, dtype=torch.float32).unsqueeze(0)
+            fallback_nugget = 1.0e-06
+            for _ in range(12):
+                try:
+                    L_cpu = torch.linalg.cholesky(C_reg_cpu + fallback_nugget * eye_200_cpu)
+                    break
+                except torch._C._LinAlgError:
+                    fallback_nugget *= 5.0
+            if L_cpu is None:
+                raise torch._C._LinAlgError("手动解几何伴随方程中，C_reg 矩阵的 Cholesky 分解失败。")
+            L_adj = L_cpu.to(device)
             
-            if 'lambda_C' in UKSSolverOp.saved_weights:
-                del UKSSolverOp.saved_weights['lambda_C']
-            Y_hat_u0.backward(grad_Y_hat)
-            lambda_C_u0 = UKSSolverOp.saved_weights['lambda_C'].float().cpu().numpy().flatten()
+            V_adj = torch.linalg.solve_triangular(L_adj, F, upper=False)
+            V_adj_T = V_adj.transpose(-2, -1)
+            V_adj_T_V = torch.bmm(V_adj_T, V_adj)
+            eye_M = torch.eye(F.shape[-1], device=device).unsqueeze(0)
+            V_adj_T_V_reg = V_adj_T_V + 1e-6 * eye_M
+            L_V_adj = torch.linalg.cholesky(V_adj_T_V_reg.cpu()).to(device)
+            
+            g_Lambda = torch.ones((1, 200, 1), dtype=dtype, device=device)
+            w_adj = torch.linalg.solve_triangular(L_adj, g_Lambda, upper=False)
+            rhs_lambda_F = torch.bmm(V_adj_T, w_adj)
+            lambda_F_temp = torch.linalg.solve_triangular(L_V_adj, rhs_lambda_F, upper=False)
+            lambda_F = torch.linalg.solve_triangular(L_V_adj.transpose(-2, -1), lambda_F_temp, upper=True)
+            
+            rhs_lambda_C = g_Lambda - torch.bmm(F, lambda_F)
+            z_adj = torch.linalg.solve_triangular(L_adj, rhs_lambda_C, upper=False)
+            lambda_C_u0_torch = torch.linalg.solve_triangular(L_adj.transpose(-2, -1), z_adj, upper=True)
+            
+            lambda_C_u0 = lambda_C_u0_torch.detach().cpu().numpy().flatten()
             
         # 3.7 计算大尺度趋势解耦与自适应椭圆核数据 (以备图 4、图 7 可视化使用)
         print("--> [报告数据提取] 正在计算大尺度趋势解耦与各向异性局部度量数据...")

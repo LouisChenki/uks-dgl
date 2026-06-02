@@ -281,34 +281,11 @@ class AdaptiveKernelNetwork(nn.Module):
 
         return C, c_0
 
-class TrendProjectionNetwork(nn.Module):
-    """
-    自适应高维非线性趋势投影网络。
-    输入 2D 坐标与外部协变量，映射为具有克里金无偏约束常数项 1 的非线性大尺度均值趋势基。
-    """
-    def __init__(self, in_features=4, out_features=5, hidden_dim=32):
-        super().__init__()
-        # out_features - 1 维用于学习非线性基特征，剩余 1 维放置常数项 1
-        self.mlp = nn.Sequential(
-            nn.Linear(in_features, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(p=DROPOUT_P),
-            nn.Linear(hidden_dim, out_features - 1)
-        )
-
-    def forward(self, coords, X_cov):
-        # 维度追踪: [B, N, 2] concat [B, N, Dx] -> [B, N, 2 + Dx]
-        inputs = torch.cat([coords, X_cov], dim=-1)
-        h = self.mlp(inputs)  # [B, N, out_features - 1]
-        ones = torch.ones_like(coords[:, :, 0:1])  # [B, N, 1]
-        F = torch.cat([ones, h], dim=-1)  # [B, N, out_features]
-        return F
-
 
 class UKSModel(nn.Module):
     """
     统一克里金系统 (Unified Kriging System, UKS) 完整神经网络。
-    集成了物理可逆高斯化流 (RealNVP)、谱嵌入 (SCE)、自适应马氏核 (AKN)、非线性趋势投影网络以及克里金求解算子。
+    集成了物理可逆高斯化流 (RealNVP)、谱嵌入 (SCE)、自适应马氏核 (AKN) 以及克里金求解算子。
     支持接收外部协变量作为大尺度全局趋势解耦的物理基底 (KED)。
     """
     def __init__(self, in_dim=1, flow_hidden_dim=32, num_flow_layers=2,
@@ -326,17 +303,26 @@ class UKSModel(nn.Module):
         # 谱特征映射为局部协方差椭圆参数，由 AKN 接收计算
         self.kernel = AdaptiveKernelNetwork(embed_dim=embed_dim, hidden_dim=kernel_hidden_dim)
 
-        # 实例化趋势投影网络，输入为 2D 坐标 + 外部协变量，输出 5 维自适应非线性趋势基
-        self.trend_net = TrendProjectionNetwork(in_features=2 + cov_dim, out_features=5, hidden_dim=32)
-
     def get_trend_matrix(self, coords, X_cov):
         """
-        通过趋势投影网络自适应提取非线性趋势基矩阵
+        提取外部协变量辅助趋势基矩阵，采用光滑的多变量二次多项式展开
+        F = [1, u_x, u_y, X_1, X_2, X_1^2, X_2^2, X_1*X_2]
         coords: [B, N, 2]
         X_cov: [B, N, D_x]
-        返回 F: [B, N, 5]
+        返回 F: [B, N, 8]
         """
-        return self.trend_net(coords, X_cov)
+        u_x = coords[:, :, 0:1]           # [B, N, 1]
+        u_y = coords[:, :, 1:2]           # [B, N, 1]
+        ones = torch.ones_like(u_x)       # [B, N, 1]
+        
+        X1 = X_cov[:, :, 0:1]             # [B, N, 1]
+        X2 = X_cov[:, :, 1:2]             # [B, N, 1]
+        X1_sq = X1 ** 2                   # [B, N, 1]
+        X2_sq = X2 ** 2                   # [B, N, 1]
+        X12 = X1 * X2                     # [B, N, 1]
+        
+        F = torch.cat([ones, u_x, u_y, X1, X2, X1_sq, X2_sq, X12], dim=-1)  # [B, N, 8]
+        return F
 
     def forward(self, Z_obs, U_obs, U_pred, X_obs, X_pred, Z_pred=None):
         """

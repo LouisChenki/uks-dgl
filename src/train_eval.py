@@ -223,11 +223,20 @@ def compute_joint_losses(
     mask = get_curriculum_loss_mask(epoch)  # [4]
     
     # 6. 自适应同方差不确定性加权与总损失汇总
-    if loss_weighting_layer is not None:
-        # 全周期自适应多任务不确定性加权（根据课程学习掩码进行平滑自适应）
+    if epoch > 120 and loss_weighting_layer is not None:
+        # 对数方差参数热启动物理对齐初始化，完全规避阶段切换导致的 Loss 数值突跳
+        with torch.no_grad():
+            if epoch == 121 and (loss_weighting_layer.log_vars == 0.0).all():
+                loss_weighting_layer.log_vars[0].copy_(torch.tensor(math.log(1.0 / (2.0 * 1.0)), device=loss_weighting_layer.log_vars.device))
+                loss_weighting_layer.log_vars[1].copy_(torch.tensor(math.log(1.0 / (2.0 * 0.1)), device=loss_weighting_layer.log_vars.device))
+                loss_weighting_layer.log_vars[2].copy_(torch.tensor(math.log(1.0 / (2.0 * lambda_flow)), device=loss_weighting_layer.log_vars.device))
+                loss_weighting_layer.log_vars[3].copy_(torch.tensor(math.log(1.0 / (2.0 * lambda_geo)), device=loss_weighting_layer.log_vars.device))
+                print(f"--> [热启动] 已在第 121 epoch 完成对数方差参数的物理对齐初始化: {loss_weighting_layer.log_vars.cpu().tolist()}")
+        
+        # 激活自适应同方差加权
         loss_total = loss_weighting_layer(loss_pred, loss_uks, loss_flow, loss_geo, mask)
     else:
-        # 无自适应加权层时的备用静态超参权重累加
+        # 阶段 1 & 2: 使用基础静态超参权重累加，强制进行硬性约束拟合
         loss_total = (loss_pred * mask[0] + 
                       lambda_flow * loss_flow * mask[2] + 
                       lambda_geo * loss_geo * mask[3] + 
