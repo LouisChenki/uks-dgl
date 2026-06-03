@@ -15,7 +15,7 @@ import scipy.stats as stats
 
 def main():
     # 1. 确保绘图输出目录存在
-    output_dir = 'results_20260602_run4/plots'
+    output_dir = 'results_20260602_run8/plots'
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs('results/plots', exist_ok=True)
     
@@ -27,8 +27,8 @@ def main():
     
     for d in d_names:
         data_path = f"data/synthetic_data_{d.lower()}.npz"
-        res_path = f"results_20260602_run4/{d}/experiment_results.npz"
-        metrics_path = f"results_20260602_run4/{d}/metrics.json"
+        res_path = f"results_20260602_run8/{d}/experiment_results.npz"
+        metrics_path = f"results_20260602_run8/{d}/metrics.json"
         
         if not (os.path.exists(data_path) and os.path.exists(res_path) and os.path.exists(metrics_path)):
             print(f"错误: 找不到数据集或实验成果文件: {d}")
@@ -40,11 +40,11 @@ def main():
             metrics_dict[d] = json.load(f)
             
     # 读取总指标与寻优轨迹数据
-    summary_metrics_path = "results_20260602_run4/metrics_summary.json"
+    summary_metrics_path = "results_20260602_run8/metrics_summary.json"
     with open(summary_metrics_path, 'r', encoding='utf-8') as f:
         summary_metrics = json.load(f)
         
-    print(f"--> [绘图启动] 成功重载第四轮实验多场景成果数据。")
+    print(f"--> [绘图启动] 成功重载第八轮实验多场景成果数据。")
     
     # 设置学术绘图风格
     plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'PingFang SC', 'SimHei', 'DejaVu Sans', 'sans-serif']
@@ -370,8 +370,8 @@ def main():
         
         titles_trend = [
             f"{d}-A. 真实趋势面 $T(u)$", 
-            f"{d}-B. 解耦趋势面 $\\hat{T}(u)$", 
-            f"{d}-C. 趋势拟合绝对偏差 |$T - \\hat{T}$|"
+            f"{d}-B. 解耦趋势面 $\\hat{{T}}(u)$", 
+            f"{d}-C. 趋势拟合绝对偏差 |$T - \\hat{{T}}$|"
         ]
         
         # vmin/vmax for Trend
@@ -407,7 +407,75 @@ def main():
     plt.savefig('results/plots/trend_surface_fit.png', bbox_inches='tight', dpi=300)
     plt.close()
     
-    print("--> [绘图完成] 7个高清晰度学术图表已经全部生成并保存。")
+    # ------------------ 图 8: latent_flow_distribution.png (3行2列非高斯流转换直方图) ------------------
+    print("--> 8. 正在绘制: latent_flow_distribution.png (图 8)")
+    fig, axes = plt.subplots(3, 2, figsize=(12, 11), dpi=300)
+    
+    for r_idx, d in enumerate(d_names):
+        data = data_dict[d]
+        res = res_dict[d]
+        
+        Z_train_raw = data['Z_train']
+        Y_train_flow = res['Y_train_flow']
+        
+        # 1) 左侧: 物理空间 Z 分布 (非高斯)
+        ax_l = axes[r_idx, 0]
+        ax_l.hist(Z_train_raw, bins=25, density=True, color='indianred', alpha=0.7, edgecolor='k', label='Z_train 物理空间')
+        # KDE 拟合
+        kde_z = stats.gaussian_kde(Z_train_raw)
+        grid_z_eval = np.linspace(Z_train_raw.min() - 0.5, Z_train_raw.max() + 0.5, 100)
+        ax_l.plot(grid_z_eval, kde_z(grid_z_eval), 'r-', lw=2, label='经验概率密度 (KDE)')
+        ax_l.set_title(f"{d}-A. 物理空间 Z 偏态分布 (偏度={stats.skew(Z_train_raw):.4f})", fontweight='bold')
+        ax_l.set_xlabel("物理观测值 $Z$")
+        ax_l.set_ylabel("概率密度 (Density)")
+        ax_l.grid(True, linestyle='--', alpha=0.4)
+        ax_l.legend(loc='upper right', fontsize=8.5)
+        
+        # 2) 右侧: 隐高斯空间 Y 分布 (高斯化)
+        ax_r = axes[r_idx, 1]
+        ax_r.hist(Y_train_flow, bins=25, density=True, color='steelblue', alpha=0.7, edgecolor='k', label='Y_train 隐高斯空间')
+        # 标准正态对比曲线
+        grid_y_eval = np.linspace(-3.5, 3.5, 100)
+        norm_pdf = stats.norm.pdf(grid_y_eval)
+        ax_r.plot(grid_y_eval, norm_pdf, 'k--', lw=1.8, label='标准正态分布 N(0, 1)')
+        ax_r.set_title(f"{d}-B. 隐高斯空间 Y 正态映射 (偏度={stats.skew(Y_train_flow):.4f})", fontweight='bold')
+        ax_r.set_xlabel("隐高斯变量 $Y$")
+        ax_r.set_ylabel("概率密度 (Density)")
+        ax_r.grid(True, linestyle='--', alpha=0.4)
+        ax_r.legend(loc='upper right', fontsize=8.5)
+        
+    plt.suptitle("可逆正态化流 (RealNVP) 物理-高斯空间投影对照图 (图 8)\n(Normalizing Flow Physical-Latent Spaces Mapping Distributions, Fig 8)", fontsize=14, fontweight='bold', y=0.98)
+    plt.savefig(f'{output_dir}/latent_flow_distribution.png', bbox_inches='tight', dpi=300)
+    plt.savefig('results/plots/latent_flow_distribution.png', bbox_inches='tight', dpi=300)
+    plt.close()
+    
+    print("--> [绘图完成] 8个高清晰度学术图表已经全部生成并保存。")
+    
+    # ------------------ [Artifact 镜像自动拷贝同步] ------------------
+    artifact_plots_dir = '/Users/chenkaiqi/.gemini/antigravity/brain/2ee1c50d-61c2-4645-b67c-68211d19de55/plots'
+    import shutil
+    os.makedirs(artifact_plots_dir, exist_ok=True)
+    os.makedirs('results/plots', exist_ok=True)
+    
+    plots_list = [
+        "raw_data_distribution.png",
+        "kriging_vs_mlp.png",
+        "uncertainty_variance.png",
+        "loss_weighting_history.png",
+        "adaptive_covariance.png",
+        "gradient_profile.png",
+        "performance_comparison_matrix.png",
+        "trend_surface_fit.png",
+        "latent_flow_distribution.png"
+    ]
+    for plt_file in plots_list:
+        src_plt = os.path.join(output_dir, plt_file)
+        dst_plt = os.path.join(artifact_plots_dir, plt_file)
+        if os.path.exists(src_plt):
+            shutil.copy2(src_plt, dst_plt)
+            shutil.copy2(src_plt, os.path.join('results/plots', plt_file))
+            
+    print("--> [Artifact 镜像] 成功同步 9 张学术图表至平台卡片镜像目录。")
 
 if __name__ == '__main__':
     main()
