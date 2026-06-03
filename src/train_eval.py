@@ -29,9 +29,9 @@ class HomoscedasticLossWeighting(nn.Module):
         """
         loss_total = 0.0
         
-        # 1. pred 任务
+        # 1. pred 任务 (施加 2.0 的物理优先级乘积因子，确保精度主导收敛)
         if mask[0] > 0.0:
-            loss_total = loss_total + 0.5 * torch.exp(-self.log_vars[0]) * loss_pred + 0.5 * self.log_vars[0]
+            loss_total = loss_total + 2.0 * (0.5 * torch.exp(-self.log_vars[0]) * loss_pred + 0.5 * self.log_vars[0])  # [1] 标量累加
             
         # 2. uks 任务
         if mask[1] > 0.0:
@@ -130,38 +130,35 @@ def compute_uks_likelihood(C, F, Y, eps=1e-5):
     return torch.mean(loss_uks)
 
 
-def get_curriculum_loss_mask(epoch):
+def get_curriculum_loss_mask(epoch, switch_epoch=120):
     """
     根据当前 Epoch 获取课程学习 (Curriculum Learning) 损失掩码。
     返回: [mask_pred, mask_uks, mask_flow, mask_geo]
     """
     if epoch <= 50:
-        # 第一阶段 (1-50 epoch): 仅加速训练物理拟合与 Normalizing Flow 通道
+        # 第一阶段 (1-50 epoch): 仅主导收敛物理精度拟合与 Normalizing Flow 体积损失
         return [1.0, 0.0, 1.0, 0.0]
-    elif epoch <= 120:
-        # 第二阶段 (51-120 epoch): 加入 UKS 似然与几何曲率 Hessian 规范，使用静态基准权值
+    elif epoch <= switch_epoch:
+        # 第二阶段 (51 - switch_epoch): 加入 UKS 似然与几何曲率 Hessian 规范，使用静态基准权值
         return [1.0, 1.0, 1.0, 1.0]
     else:
-        # 第三阶段 (121-200 epoch): 开启所有损失，并由 HomoscedasticLossWeighting 进行自适应加权寻优
+        # 第三阶段: 开启所有损失，并由 HomoscedasticLossWeighting 进行自适应加权寻优
         return [1.0, 1.0, 1.0, 1.0]
 
 
 def compute_joint_losses(
     model, Z_obs, U_obs, U_pred, X_obs, X_pred, Z_pred, H_obs, 
-    lambda_flow=0.01, lambda_geo=0.001, epoch=1, loss_weighting_layer=None
+    lambda_flow=0.01, lambda_geo=0.001, epoch=1, loss_weighting_layer=None,
+    switch_epoch=120
 ):
     """
     计算空间神经网络统一克里金系统 (UKS-DGL) 的联合损失函数。
     集成空间自监督重构 Pred 损失、UKS 结构对数似然损失、Flow 雅可比体积损失以及 Hessian 拓扑几何损失。
     """
-    # 空间坐标抖动数据增强：在训练前向时对观测点坐标加入微弱的高斯噪声，防止 SCE 网络过分对地理位置硬性记忆
-    if model.training:
-        U_obs = U_obs + torch.randn_like(U_obs) * 0.008
-
     B, N, D_in = Z_obs.shape
 
     # 1. 运行模型前向传播，计算预测值及高斯流隐变量
-    Z_hat, Y_all_flow, log_det_all = model(Z_obs, U_obs, U_pred, X_obs, X_pred, Z_pred)  # Z_hat: [B, 1, 1]
+    Z_hat, Y_all_flow, log_det_all = model(Z_obs, U_obs, U_pred, X_obs, X_pred, Z_pred)  # Z_hat: [B, 1, 1], Y_all_flow: [B, N+1, D_flow]
     
     # 空间自监督重构损失 L_Pred
     loss_pred = torch.mean((Z_hat - Z_pred) ** 2)
@@ -176,12 +173,12 @@ def compute_joint_losses(
     # 从前向中直接获取自适应马氏协方差 C 与全局趋势面基底 F
     # SCE 的已知点谱嵌入 H_obs
     H_pred_eval = model.sce(U_pred)  # [B, 1, embed_dim]
-    C, _ = model.kernel(H_obs, H_pred_eval, U_obs, U_pred)  # C: [B, N, N]
+    C, _ = model.kernel(H_obs, H_pred_eval, U_obs, U_pred)  # C: [B, N, N], _ : [B, N, 1]
     F = model.get_trend_matrix(U_obs, X_obs)  # F: [B, N, M]
     
     # 高斯隐变量的观测部分 Y_obs_flow
     # 从 Y_all_flow 中截取已知点 [B, N, 2]
-    Y_obs_flow = Y_all_flow[:, :N, :]  # [B, N, 2]
+    Y_obs_flow = Y_all_flow[:, :N, :]  # [B, N, D_flow]
     
     loss_uks = compute_uks_likelihood(C, F, Y_obs_flow, eps=model.eps)
 
@@ -222,28 +219,28 @@ def compute_joint_losses(
     )[0][:, 0, 1]  # [B]
     
     loss_geo_raw = torch.mean(grad_xx ** 2 + grad_yy ** 2)
-    # 几何正则退火权重调度：阶段 3 (epoch > 120) 微调时将几何正则权重退火衰减至 10%，释放局部核函数的各向异性自由度
-    geo_anneal_factor = 0.1 if epoch > 120 else 1.0
+    # 几何正则退火权重调度：第 3 阶段 (epoch > switch_epoch) 微调时将几何正则权重退火衰减至 10%
+    geo_anneal_factor = 0.1 if epoch > switch_epoch else 1.0
     loss_geo = geo_anneal_factor * loss_geo_raw
 
     # 5. 课程学习 (Curriculum Learning) 掩码计算
-    mask = get_curriculum_loss_mask(epoch)  # [4]
+    mask = get_curriculum_loss_mask(epoch, switch_epoch)  # [4]
     
     # 6. 自适应同方差不确定性加权与总损失汇总
-    if epoch > 120 and loss_weighting_layer is not None:
+    if epoch > switch_epoch and loss_weighting_layer is not None:
         # 对数方差参数热启动物理对齐初始化，完全规避阶段切换导致的 Loss 数值突跳
         with torch.no_grad():
-            if epoch == 121 and (loss_weighting_layer.log_vars == 0.0).all():
-                loss_weighting_layer.log_vars[0].copy_(torch.tensor(math.log(1.0 / (2.0 * 1.0)), device=loss_weighting_layer.log_vars.device))
+            if epoch == switch_epoch + 1 and (loss_weighting_layer.log_vars == 0.0).all():
+                loss_weighting_layer.log_vars[0].copy_(torch.tensor(math.log(1.0 / (2.0 * 2.0 * 1.0)), device=loss_weighting_layer.log_vars.device)) # 放大 2.0 优先级
                 loss_weighting_layer.log_vars[1].copy_(torch.tensor(math.log(1.0 / (2.0 * 0.1)), device=loss_weighting_layer.log_vars.device))
                 loss_weighting_layer.log_vars[2].copy_(torch.tensor(math.log(1.0 / (2.0 * lambda_flow)), device=loss_weighting_layer.log_vars.device))
                 loss_weighting_layer.log_vars[3].copy_(torch.tensor(math.log(1.0 / (2.0 * lambda_geo)), device=loss_weighting_layer.log_vars.device))
-                print(f"--> [热启动] 已在第 121 epoch 完成对数方差参数的物理对齐初始化: {loss_weighting_layer.log_vars.cpu().tolist()}")
+                print(f"--> [热启动] 已在第 {epoch} epoch 完成对数方差参数的物理对齐初始化: {loss_weighting_layer.log_vars.cpu().tolist()}")
         
         # 激活自适应同方差加权
         loss_total = loss_weighting_layer(loss_pred, loss_uks, loss_flow, loss_geo, mask)
     else:
-        # 阶段 1 & 2: 使用基础静态超参权重累加，强制进行硬性约束拟合
+        # 阶段 1 & 2: 使用精度主导的静态超参权重累加
         loss_total = (loss_pred * mask[0] + 
                       lambda_flow * loss_flow * mask[2] + 
                       lambda_geo * loss_geo * mask[3] + 
