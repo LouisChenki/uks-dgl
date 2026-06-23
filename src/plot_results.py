@@ -145,15 +145,87 @@ def main():
         ax.set_xlabel("X 坐标")
         ax.set_ylabel("Y 坐标")
         ax.legend(loc='upper right', fontsize=8)
-        fig.colorbar(im, ax=ax, label='物理空间条件方差 $\\sigma_Z^2$')
+        fig.colorbar(im, ax=ax, label='物理空间条件方差 $\sigma_Z^2$')
         
     plt.suptitle("物理空间估计不确定性条件方差场等值线图 (图 2)\n(Physical Conditional Variance Anisotropy Contour Maps, Fig 2)", fontsize=14, fontweight='bold', y=0.98)
     plt.savefig(f'{output_dir}/uncertainty_variance.png', bbox_inches='tight', dpi=300)
     plt.savefig('results/plots/uncertainty_variance.png', bbox_inches='tight', dpi=300)
     plt.close()
+
     
-    # ------------------ 图 3: loss_weighting_history.png (超参敏感响应面与训练Loss权重历程) ------------------
-    print("--> 3. 正在绘制: loss_weighting_history.png (图 3)")
+    # ------------------ 图 3: trend_surface_fit.png (4行3列趋势面解耦与绝对偏差场) ------------------
+    print("--> 3. 正在绘制: trend_surface_fit.png (图 3)")
+    fig = plt.figure(figsize=(15, 17), dpi=300)
+    gs = gridspec.GridSpec(4, 3, figure=fig, hspace=0.25, wspace=0.20)
+    
+    for r_idx, d in enumerate(d_names):
+        data = data_dict[d]
+        res = res_dict[d]
+        coords_train = data['coords_train']
+        coords_test = res['coords_test']
+        points = np.vstack([coords_train, coords_test])
+        
+        M_train = data['M_train']
+        M_test = data['M_test']
+        M_true_all = np.concatenate([M_train, M_test])
+        if M_true_all.ndim > 1:
+            M_true_all = M_true_all[:, 0]
+            
+        M_hat_train = res['M_hat_train']
+        M_hat_test = res['M_hat_test']
+        M_hat_all = np.concatenate([M_hat_train, M_hat_test])
+        if M_hat_all.ndim > 1:
+            M_hat_all = M_hat_all[:, 0]
+        
+        # 计算绝对差场
+        abs_diff_all = np.abs(M_true_all - M_hat_all)
+
+        
+        grid_mt = griddata(points, M_true_all, (grid_x, grid_y), method='cubic')
+        grid_mh = griddata(points, M_hat_all, (grid_x, grid_y), method='cubic')
+        grid_diff = griddata(points, abs_diff_all, (grid_x, grid_y), method='cubic')
+        
+        titles_trend = [
+            f"Scenario {d}: 真实趋势面 $T(u)$", 
+            f"Scenario {d}: 解耦趋势面 $\\hat{{T}}(u)$", 
+            f"Scenario {d}: 趋势拟合绝对偏差 |$T - \\hat{{T}}$|"
+        ]
+        
+        # vmin/vmax for Trend
+        vmin_m = min(M_true_all.min(), M_hat_all.min())
+        vmax_m = max(M_true_all.max(), M_hat_all.max())
+        
+        # col 0: 真实趋势面
+        ax_col0 = fig.add_subplot(gs[r_idx, 0])
+        im0 = ax_col0.imshow(grid_mt.T, extent=(0, 1, 0, 1), origin='lower', cmap='viridis', vmin=vmin_m, vmax=vmax_m)
+        ax_col0.set_title(titles_trend[0], fontweight='bold')
+        ax_col0.set_xlabel("X 坐标")
+        ax_col0.set_ylabel("Y 坐标")
+        fig.colorbar(im0, ax=ax_col0, fraction=0.046, pad=0.04)
+        
+        # col 1: 网络解耦趋势面
+        ax_col1 = fig.add_subplot(gs[r_idx, 1])
+        im1 = ax_col1.imshow(grid_mh.T, extent=(0, 1, 0, 1), origin='lower', cmap='viridis', vmin=vmin_m, vmax=vmax_m)
+        ax_col1.set_title(titles_trend[1], fontweight='bold')
+        ax_col1.set_xlabel("X 坐标")
+        ax_col1.set_ylabel("Y 坐标")
+        fig.colorbar(im1, ax=ax_col1, fraction=0.046, pad=0.04)
+        
+        # col 2: 绝对偏差场
+        ax_col2 = fig.add_subplot(gs[r_idx, 2])
+        im2 = ax_col2.imshow(grid_diff.T, extent=(0, 1, 0, 1), origin='lower', cmap='plasma')
+        ax_col2.set_title(titles_trend[2], fontweight='bold')
+        ax_col2.set_xlabel("X 坐标")
+        ax_col2.set_ylabel("Y 坐标")
+        fig.colorbar(im2, ax=ax_col2, fraction=0.046, pad=0.04)
+        
+    plt.suptitle("大尺度趋势面拟合与神经网络解耦绝对偏差对比场 (图 3)\n(Decoupled Trend Surface vs. True Trend & Absolute Error Comparison, Fig 3)", fontsize=15, fontweight='bold', y=0.97)
+    plt.savefig(f'{output_dir}/trend_surface_fit.png', bbox_inches='tight', dpi=300)
+    plt.savefig('results/plots/trend_surface_fit.png', bbox_inches='tight', dpi=300)
+    plt.close()
+    
+    # ------------------ 图 4: loss_weighting_history.png (超参敏感响应面与训练Loss权重历程) ------------------
+    print("--> 4. 正在绘制: loss_weighting_history.png (图 4)")
     
     fig, axes = plt.subplots(1, 2, figsize=(16, 5.5), dpi=300)
     
@@ -224,13 +296,13 @@ def main():
     else:
         axes[1].text(0.5, 0.5, "Scenario B 最优模型训练历史未找到", ha="center", va="center")
         
-    plt.suptitle("自适应多场景超参寻优及多任务损失同方差加权历史收敛图 (图 3)\n(Multi-scenario Hyperparameter Search & Homoscedastic Weighting History, Fig 3)", fontsize=14, fontweight='bold', y=1.02)
+    plt.suptitle("自适应多场景超参寻优及多任务损失同方差加权历史收敛图 (图 4)\n(Multi-scenario Hyperparameter Search & Homoscedastic Weighting History, Fig 4)", fontsize=14, fontweight='bold', y=1.02)
     plt.savefig(f'{output_dir}/loss_weighting_history.png', bbox_inches='tight', dpi=300)
     plt.savefig('results/plots/loss_weighting_history.png', bbox_inches='tight', dpi=300)
     plt.close()
     
-    # ------------------ 图 4: adaptive_covariance.png (4行3列协方差马氏椭圆对比) ------------------
-    print("--> 4. 正在绘制: adaptive_covariance.png (图 4)")
+    # ------------------ 图 5: adaptive_covariance.png (4行3列协方差马氏椭圆对比) ------------------
+    print("--> 5. 正在绘制: adaptive_covariance.png (图 5)")
     fig = plt.figure(figsize=(15, 16), dpi=300)
     gs = gridspec.GridSpec(4, 3, figure=fig, hspace=0.25, wspace=0.20)
     
@@ -264,13 +336,13 @@ def main():
             ax.set_ylabel("Y 坐标")
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             
-    plt.suptitle("自适应局部协方差空间各向异性与非平稳马氏椭圆拟合图 (图 4)\n(Local Anisotropic Covariance Mahalanobis Ellipses comparison, Fig 4)", fontsize=14, fontweight='bold', y=0.96)
+    plt.suptitle("自适应局部协方差空间各向异性与非平稳马氏椭圆拟合图 (图 5)\n(Local Anisotropic Covariance Mahalanobis Ellipses comparison, Fig 5)", fontsize=14, fontweight='bold', y=0.96)
     plt.savefig(f'{output_dir}/adaptive_covariance.png', bbox_inches='tight', dpi=300)
     plt.savefig('results/plots/adaptive_covariance.png', bbox_inches='tight', dpi=300)
     plt.close()
     
-    # ------------------ 图 5: gradient_profile.png (Scenario B 在常数趋势最优点的前反向伴随) ------------------
-    print("--> 5. 正在绘制: gradient_profile.png (图 5)")
+    # ------------------ 图 6: gradient_profile.png (Scenario B 在常数趋势最优点的前反向伴随) ------------------
+    print("--> 6. 正在绘制: gradient_profile.png (图 6)")
     res_b = res_dict["B"]
     data_b = data_dict["B"]
     
@@ -282,11 +354,6 @@ def main():
         N_train = len(coords_train)
         Lambda_u0_sub = Lambda_u0[:N_train]
         lambda_C_u0_sub = lambda_C_u0[:N_train]
-        
-        # 采用 RBF 对散点权重进行 2D 平滑插值投影
-        grid_x_cov = np.linspace(0, 1, 100)
-        grid_y_cov = np.linspace(0, 1, 100)
-        g_xx, g_yy = np.meshgrid(grid_x_cov, grid_y_cov)
         
         # 采用 griddata cubic 方法对散点权重进行精确的 2D 空间插值投影，保证局部各向异性的细节不被大尺度 RBF 抹平
         grid_x_cov = np.linspace(0, 1, 150)
@@ -362,15 +429,13 @@ def main():
         ax = fig.add_subplot(111)
         ax.text(0.5, 0.5, "Scenario B 伴随点梯度数据尚未计算", ha="center", va="center")
         
-    plt.suptitle("前反向传播物理伴随同构双扩散场分析图 (图 5)\n(Forward-Backward Spatial Adjoint Isomorphism Dual Diffusion Fields, Fig 5)", fontsize=14, fontweight='bold', y=1.02)
+    plt.suptitle("前反向传播物理伴随同构双扩散场分析图 (图 6)\n(Forward-Backward Spatial Adjoint Isomorphism Dual Diffusion Fields, Fig 6)", fontsize=14, fontweight='bold', y=1.02)
     plt.savefig(f'{output_dir}/gradient_profile.png', bbox_inches='tight', dpi=300)
     plt.savefig('results/plots/gradient_profile.png', bbox_inches='tight', dpi=300)
     plt.close()
     
-    
-    
-    # ------------------ 图 6: cross_section_profile.png (Scenario D 切线剖面估计对照图) ------------------
-    print("--> 6. 正在绘制: cross_section_profile.png (图 6)")
+    # ------------------ 图 7: cross_section_profile.png (Scenario D 切线剖面估计对照图) ------------------
+    print("--> 7. 正在绘制: cross_section_profile.png (图 7)")
     res_d = res_dict["D"]
     data_d = data_dict["D"]
     coords_train_d = data_d['coords_train']
@@ -407,7 +472,7 @@ def main():
     near_mask = (coords_train_d[:, 1] >= 0.45) & (coords_train_d[:, 1] <= 0.55)
     ax.scatter(coords_train_d[near_mask, 0], Z_train_d[near_mask], color='black', marker='o', s=45, zorder=5, label='临近已知采样点')
     
-    ax.set_title("场景 D 大尺度随机场中心剖面线一维估计对照图 (Y = 0.5)\n(Scenario D Cross-Section Profile Interpolation comparison at Y = 0.5, Fig 6)", fontsize=11, fontweight='bold')
+    ax.set_title("场景 D 大尺度随机场中心剖面线一维估计对照图 (Y = 0.5)\n(Scenario D Cross-Section Profile Interpolation comparison at Y = 0.5, Fig 7)", fontsize=11, fontweight='bold')
     ax.set_xlabel("X 空间坐标")
     ax.set_ylabel("主变量估计值 $Z_1$")
     ax.grid(True, linestyle='--', alpha=0.5)
@@ -417,8 +482,8 @@ def main():
     plt.savefig('results/plots/cross_section_profile.png', bbox_inches='tight', dpi=300)
     plt.close()
  
-    # ------------------ 图 7: residual_distribution.png (预测残差空间高斯性诊断概率密度图) ------------------
-    print("--> 7. 正在绘制: residual_distribution.png (图 7)")
+    # ------------------ 图 8: residual_distribution.png (预测残差空间高斯性诊断概率密度图) ------------------
+    print("--> 8. 正在绘制: residual_distribution.png (图 8)")
     fig, axes = plt.subplots(1, 2, figsize=(15, 5), dpi=300)
     
     # 子图 A: 场景 D 的残差 KDE 曲线
@@ -480,13 +545,15 @@ def main():
     axes[1].grid(True, linestyle='--', alpha=0.5)
     axes[1].legend(loc='upper right')
     
-    plt.suptitle("各模型插值残差概率密度空间高斯性诊断对比图 (图 7)\n(Interpolation Residual Probability Density (KDE) and Gaussianity Diagnostics, Fig 7)", fontsize=14, fontweight='bold', y=1.02)
+    plt.suptitle("各模型插值残差概率密度空间高斯性诊断对比图 (图 8)\n(Interpolation Residual Probability Density (KDE) and Gaussianity Diagnostics, Fig 8)", fontsize=14, fontweight='bold', y=1.02)
     
     plt.savefig(f'{output_dir}/residual_distribution.png', bbox_inches='tight', dpi=300)
     plt.savefig('results/plots/residual_distribution.png', bbox_inches='tight', dpi=300)
     plt.close()
     
-    print("--> [绘图完成] 7个高清晰度学术图表已经全部生成并保存。")
+    print("--> [绘图完成] 8个高清晰度学术图表已经全部生成并保存。")
 
+    
 if __name__ == '__main__':
     main()
+

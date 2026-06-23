@@ -62,7 +62,7 @@ learning_mechanics_test/
 ├── results_20260608_run11/  # 最优实验结果归档 (A, B, C, D 文件夹)
 │   ├── A/                   # A 场景最优权重 uks_model.pth 与 metrics.json
 │   ├── B/                   # B 场景最优权重 uks_model.pth 与 metrics.json
-│   └── plots/               # 渲染生成的 7 张高分辨率学术图表
+│   └── plots/               # 渲染生成的 8 张高分辨率学术图表
 ├── scratch/
 │   ├── tune_scenario_a.py   # 场景 A 的 HPO 调优程序
 │   └── tune_scenario_b.py   # 场景 B 的 HPO 调优程序
@@ -75,9 +75,10 @@ learning_mechanics_test/
 
 ## 🚀 5. 快速运行与验证 (Quick Start)
 
-### 5.1 重新绘制 7 张学术插图
+### 5.1 重新绘制 8 张学术插图
 在本地直接运行重构后的绘图脚本：
 ```bash
 python3 src/plot_results.py
 ```
+
 图像将输出至 `results_20260608_run11/plots/` 目录下。
