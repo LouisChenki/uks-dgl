@@ -10,3 +10,6 @@ __pycache__/
 !*.npz
 !*.pth
 !*.png
+!README.md
+!task.md
+

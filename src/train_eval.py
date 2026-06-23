@@ -155,10 +155,10 @@ def compute_joint_losses(
     计算空间神经网络统一克里金系统 (UKS-DGL) 的联合损失函数。
     集成空间自监督重构 Pred 损失、UKS 结构对数似然损失、Flow 雅可比体积损失以及 Hessian 拓扑几何损失。
     """
-    B, N, D_in = Z_obs.shape
+    B, N, q = Z_obs.shape
 
     # 1. 运行模型前向传播，计算预测值及高斯流隐变量
-    Z_hat, Y_all_flow, log_det_all = model(Z_obs, U_obs, U_pred, X_obs, X_pred, Z_pred)  # Z_hat: [B, 1, 1], Y_all_flow: [B, N+1, D_flow]
+    Z_hat, Y_all_flow, log_det_all = model(Z_obs, U_obs, U_pred, X_obs, X_pred, Z_pred)  # Z_hat: [B, 1, q], Y_all_flow: [B, N+1, q]
     
     # 空间自监督重构损失 L_Pred
     loss_pred = torch.mean((Z_hat - Z_pred) ** 2)
@@ -171,23 +171,49 @@ def compute_joint_losses(
 
     # 3. 计算 UKS 结构似然损失 L_UKS
     # 从前向中直接获取自适应马氏协方差 C 与全局趋势面基底 F
-    # SCE 的已知点谱嵌入 H_obs
     H_pred_eval = model.sce(U_pred)  # [B, 1, embed_dim]
-    C, _ = model.kernel(H_obs, H_pred_eval, U_obs, U_pred)  # C: [B, N, N], _ : [B, N, 1]
-    F = model.get_trend_matrix(U_obs, X_obs)  # F: [B, N, M]
+    C, _ = model.kernel(H_obs, H_pred_eval, U_obs, U_pred)  # C: [B, Nq, Nq]
     
-    # 高斯隐变量的观测部分 Y_obs_flow
-    # 从 Y_all_flow 中截取已知点 [B, N, 2]
-    Y_obs_flow = Y_all_flow[:, :N, :]  # [B, N, D_flow]
+    # 拼接多通道设计矩阵
+    F_0 = model.get_single_trend_matrix(U_obs)
+    F = model.get_block_trend_matrix(F_0)  # [B, Nq, q(L+1)]
     
-    loss_uks = compute_uks_likelihood(C, F, Y_obs_flow, eps=model.eps)
+    # 高斯隐变量的观测部分 Y_obs_flow 并堆叠为列向量
+    Y_obs_flow = Y_all_flow[:, :N, :]  # [B, N, q]
+    Y_stacked = Y_obs_flow.transpose(-2, -1).reshape(B, N * q, 1)  # [B, Nq, 1]
+    
+    loss_uks = compute_uks_likelihood(C, F, Y_stacked, eps=model.eps)
 
-    # 4. 计算二阶曲率几何拓扑损失 L_Geo
-    U_pred_reg = U_pred.clone().detach().requires_grad_(True)  # [B, 1, 2]
-    H_pred_reg = model.sce(U_pred_reg)  # [B, 1, embed_dim]
+    # 4. 计算二阶曲率几何拓扑损失 L_Geo 与新增的物理空间正则 (Spatial Regularization)
+    U_pred_reg = U_pred.clone().detach().requires_grad_(True)  # [B, 1, 2] -> [B, 1, 2] 维度追踪 (Dimension Tracking)
+    H_pred_reg = model.sce(U_pred_reg)  # [B, 1, embed_dim] -> [B, 1, 16] 维度追踪 (Dimension Tracking)
     
-    # 计算带有梯度的 c_0 互协方差向量
-    _, c_0_reg = model.kernel(H_obs, H_pred_reg, U_obs, U_pred_reg)  # [B, N, 1]
+    # 4.1 计算已知点处的空间变形位移惩罚 (Warping L2 Penalty)，限制隐坐标过度膨胀折叠 (Manifold distortion)
+    _ = model.sce(U_obs)                                       # 触发前向传播以捕获 last_warp，维度: [B, N, 16] 维度追踪
+    loss_warp = torch.mean(torch.sum(model.sce.last_warp ** 2, dim=-1)) # [B, N, 2] -> [] 标量 维度追踪 (Dimension Tracking)
+    
+    # 4.2 计算大尺度自适应趋势面的狄利克雷能量平滑惩罚 (Dirichlet Energy Smoothing Penalty)
+    # 对无规则分布的地理 2D 散点，惩罚非线性趋势项关于位置坐标的一阶导数平方和，保障趋势外推平稳度
+    U_obs_reg = U_obs.clone().detach().requires_grad_(True)    # [B, N, 2] -> [B, N, 2] 维度追踪 (Dimension Tracking)
+    F_0_reg = model.get_single_trend_matrix(U_obs_reg)         # [B, N, L]
+    
+    if F_0_reg.shape[-1] > 3:
+        f_nonlinear_reg = F_0_reg[:, :, 3:]                    # 提取高阶设计基底，维度: [B, N, L-3] 维度追踪 (Dimension Tracking)
+        # 获取趋势面关于输入空间位置坐标的一阶梯度
+        grad_trend = torch.autograd.grad(
+            outputs=f_nonlinear_reg.sum(),
+            inputs=U_obs_reg,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True
+        )[0]                                                   # [B, N, 2] -> [B, N, 2] 维度追踪 (Dimension Tracking)
+        loss_trend_smooth = torch.mean(torch.sum(grad_trend ** 2, dim=-1)) # [B, N] -> [] 标量 维度追踪 (Dimension Tracking)
+    else:
+        loss_trend_smooth = torch.zeros(1, dtype=F_0_reg.dtype, device=F_0_reg.device).squeeze()
+
+    # 4.3 计算互协方差核函数的空间二阶曲率 Hessian 惩罚
+    # 计算带有梯度的 c_0 互协方差向量 [B, Nq, q]
+    _, c_0_reg = model.kernel(H_obs, H_pred_reg, U_obs, U_pred_reg)  # [B, 2N, 2] 维度追踪 (Dimension Tracking)
     
     # 求一阶梯度
     grad_c0 = torch.autograd.grad(
@@ -196,19 +222,19 @@ def compute_joint_losses(
         create_graph=True,
         retain_graph=True,
         only_inputs=True
-    )[0]  # [B, 1, 2]
+    )[0]  # [B, 1, 2] -> [B, 1, 2] 维度追踪 (Dimension Tracking)
     
-    grad_c0_x = grad_c0[:, 0, 0]  # [B]
-    grad_c0_y = grad_c0[:, 0, 1]  # [B]
+    grad_c0_x = grad_c0[:, 0, 0]  # [B] -> [B] 维度追踪 (Dimension Tracking)
+    grad_c0_y = grad_c0[:, 0, 1]  # [B] -> [B] 维度追踪 (Dimension Tracking)
     
-    # 求解对坐标分量的二阶偏导数
+    # 求解对坐标分量的二阶偏导数，度量变差函数曲率平滑性
     grad_xx = torch.autograd.grad(
         outputs=grad_c0_x.sum(),
         inputs=U_pred_reg,
         create_graph=True,
         retain_graph=True,
         only_inputs=True
-    )[0][:, 0, 0]  # [B]
+    )[0][:, 0, 0]  # [B] -> [B] 维度追踪 (Dimension Tracking)
     
     grad_yy = torch.autograd.grad(
         outputs=grad_c0_y.sum(),
@@ -216,15 +242,25 @@ def compute_joint_losses(
         create_graph=True,
         retain_graph=True,
         only_inputs=True
-    )[0][:, 0, 1]  # [B]
+    )[0][:, 0, 1]  # [B] -> [B] 维度追踪 (Dimension Tracking)
     
     loss_geo_raw = torch.mean(grad_xx ** 2 + grad_yy ** 2)
+    
+    # 融合同位移变形 L2 惩罚与趋势平滑正则项，整合为统一的几何空间正则损失 L_geo
+    loss_geo_raw = loss_geo_raw + 0.05 * loss_warp + 0.02 * loss_trend_smooth
+    
     # 几何正则退火权重调度：第 3 阶段 (epoch > switch_epoch) 微调时将几何正则权重退火衰减至 10%
     geo_anneal_factor = 0.1 if epoch > switch_epoch else 1.0
     loss_geo = geo_anneal_factor * loss_geo_raw
 
     # 5. 课程学习 (Curriculum Learning) 掩码计算
     mask = get_curriculum_loss_mask(epoch, switch_epoch)  # [4]
+    
+    # 强制使 0 权重的正则项不参与多任务损失自适应加权，避免零因子干扰
+    if lambda_flow == 0.0:
+        mask[2] = 0.0
+    if lambda_geo == 0.0:
+        mask[3] = 0.0
     
     # 6. 自适应同方差不确定性加权与总损失汇总
     if epoch > switch_epoch and loss_weighting_layer is not None:
@@ -233,8 +269,10 @@ def compute_joint_losses(
             if epoch == switch_epoch + 1 and (loss_weighting_layer.log_vars == 0.0).all():
                 loss_weighting_layer.log_vars[0].copy_(torch.tensor(math.log(1.0 / (2.0 * 2.0 * 1.0)), device=loss_weighting_layer.log_vars.device)) # 放大 2.0 优先级
                 loss_weighting_layer.log_vars[1].copy_(torch.tensor(math.log(1.0 / (2.0 * 0.1)), device=loss_weighting_layer.log_vars.device))
-                loss_weighting_layer.log_vars[2].copy_(torch.tensor(math.log(1.0 / (2.0 * lambda_flow)), device=loss_weighting_layer.log_vars.device))
-                loss_weighting_layer.log_vars[3].copy_(torch.tensor(math.log(1.0 / (2.0 * lambda_geo)), device=loss_weighting_layer.log_vars.device))
+                lambda_flow_safe = lambda_flow if lambda_flow > 0 else 1e-7
+                lambda_geo_safe = lambda_geo if lambda_geo > 0 else 1e-7
+                loss_weighting_layer.log_vars[2].copy_(torch.tensor(math.log(1.0 / (2.0 * lambda_flow_safe)), device=loss_weighting_layer.log_vars.device))
+                loss_weighting_layer.log_vars[3].copy_(torch.tensor(math.log(1.0 / (2.0 * lambda_geo_safe)), device=loss_weighting_layer.log_vars.device))
                 print(f"--> [热启动] 已在第 {epoch} epoch 完成对数方差参数的物理对齐初始化: {loss_weighting_layer.log_vars.cpu().tolist()}")
         
         # 激活自适应同方差加权
