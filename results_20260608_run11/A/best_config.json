@@ -1,12 +1,12 @@
 {
     "lr": 0.0015,
-    "lambda_flow": 0.001,
-    "lambda_geo": 1e-05,
-    "nugget_eps": 1e-07,
+    "lambda_flow": 0.0,
+    "lambda_geo": 0.0,
+    "nugget_eps": 1e-05,
     "trend_type": "constant",
-    "l2_max": 0.02,
+    "l2_max": 0.01,
     "force_isotropic": true,
     "num_samples": 400,
-    "patience": 250,
-    "epochs_p3": 250
+    "patience": 180,
+    "epochs_p3": 200
 }

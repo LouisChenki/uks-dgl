@@ -1,0 +1,13 @@
+{
+    "lr": 0.0003,
+    "lambda_flow": 0.0005,
+    "lambda_geo": 5e-06,
+    "nugget_eps": 5e-05,
+    "trend_type": "quadratic",
+    "l2_max": 0.2,
+    "force_isotropic": true,
+    "rff_sigma": 10.0,
+    "num_samples": 400,
+    "patience": 100,
+    "epochs_p3": 300
+}

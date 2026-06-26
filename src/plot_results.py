@@ -19,8 +19,8 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs('results/plots', exist_ok=True)
     
-    # 2. 检查并载入四个场景数据
-    d_names = ["A", "B", "C", "D"]
+    # 2. 检查并载入六个场景数据
+    d_names = ["A", "B", "C", "D", "E", "F"]
     data_dict = {}
     res_dict = {}
     metrics_dict = {}
@@ -50,8 +50,9 @@ def main():
     
     # ------------------ 图 1: kriging_vs_mlp.png (4行8列空间插值矩阵) ------------------
     print("--> 1. 正在绘制: kriging_vs_mlp.png (图 1)")
-    fig = plt.figure(figsize=(26, 15), dpi=300)
-    gs = gridspec.GridSpec(4, 8, figure=fig, hspace=0.22, wspace=0.16)
+    fig = plt.figure(figsize=(26, 22.5), dpi=300)
+    gs = gridspec.GridSpec(6, 8, figure=fig, hspace=0.22, wspace=0.16)
+
     
     for r_idx, d in enumerate(d_names):
         data = data_dict[d]
@@ -121,9 +122,9 @@ def main():
     plt.savefig('results/plots/kriging_vs_mlp.png', bbox_inches='tight', dpi=300)
     plt.close()
     
-    # ------------------ 图 2: uncertainty_variance.png (1行4列条件估计方差场) ------------------
+    # ------------------ 图 2: uncertainty_variance.png (1行6列条件估计方差场) ------------------
     print("--> 2. 正在绘制: uncertainty_variance.png (图 2)")
-    fig, axes = plt.subplots(1, 4, figsize=(22, 4.8), dpi=300)
+    fig, axes = plt.subplots(1, 6, figsize=(33, 4.8), dpi=300)
     
     for c_idx, d in enumerate(d_names):
         res = res_dict[d]
@@ -153,10 +154,10 @@ def main():
     plt.close()
 
     
-    # ------------------ 图 3: trend_surface_fit.png (4行3列趋势面解耦与绝对偏差场) ------------------
+    # ------------------ 图 3: trend_surface_fit.png (6行3列趋势面解耦与绝对偏差场) ------------------
     print("--> 3. 正在绘制: trend_surface_fit.png (图 3)")
-    fig = plt.figure(figsize=(15, 17), dpi=300)
-    gs = gridspec.GridSpec(4, 3, figure=fig, hspace=0.25, wspace=0.20)
+    fig = plt.figure(figsize=(15, 25.5), dpi=300)
+    gs = gridspec.GridSpec(6, 3, figure=fig, hspace=0.25, wspace=0.20)
     
     for r_idx, d in enumerate(d_names):
         data = data_dict[d]
@@ -303,20 +304,25 @@ def main():
     
     # ------------------ 图 5: adaptive_covariance.png (4行3列协方差马氏椭圆对比) ------------------
     print("--> 5. 正在绘制: adaptive_covariance.png (图 5)")
-    fig = plt.figure(figsize=(15, 16), dpi=300)
-    gs = gridspec.GridSpec(4, 3, figure=fig, hspace=0.25, wspace=0.20)
+    fig = plt.figure(figsize=(15, 24), dpi=300)
+    gs = gridspec.GridSpec(6, 3, figure=fig, hspace=0.25, wspace=0.20)
     
     ref_pts = [[0.2, 0.2], [0.5, 0.5], [0.8, 0.8]]
-    g_x_cov = np.linspace(0, 1, 50)
-    g_y_cov = np.linspace(0, 1, 50)
-    g_xx, g_yy = np.meshgrid(g_x_cov, g_y_cov)
     
     for r_idx, d in enumerate(d_names):
         res = res_dict[d]
-        cov1 = res['cov_field_1'].reshape(50, 50)
-        cov2 = res['cov_field_2'].reshape(50, 50)
-        cov3 = res['cov_field_3'].reshape(50, 50)
+        size1 = res['cov_field_1'].size
+        n = int(np.sqrt(size1))
+        
+        g_x_cov = np.linspace(0, 1, n)
+        g_y_cov = np.linspace(0, 1, n)
+        g_xx, g_yy = np.meshgrid(g_x_cov, g_y_cov)
+        
+        cov1 = res['cov_field_1'].reshape(n, n)
+        cov2 = res['cov_field_2'].reshape(n, n)
+        cov3 = res['cov_field_3'].reshape(n, n)
         covs = [cov1, cov2, cov3]
+
         
         labels_cov = [
             f"Scenario {d}: u1=(0.2, 0.2)", 
@@ -512,7 +518,7 @@ def main():
     axes[0].grid(True, linestyle='--', alpha=0.5)
     axes[0].legend(loc='upper right')
     
-    # 子图 B: 全场景 (A-D) 汇总残差 KDE 曲线
+    # 子图 B: 全场景 (A-F) 汇总残差 KDE 曲线
     all_err_uks = []
     all_err_ok = []
     all_err_mlp = []
@@ -539,7 +545,7 @@ def main():
     norm_pdf_all = stats.norm.pdf(x_range_all, loc=0, scale=1.0)
     axes[1].plot(x_range_all, norm_pdf_all, label='标准正态参考 $N(0, 1)$', color='gray', linestyle='--', alpha=0.7)
     
-    axes[1].set_title("B. 全局四场景 (A-D) 汇总测试集预测残差 KDE 密度分布", fontweight='bold')
+    axes[1].set_title("B. 全局六场景 (A-F) 汇总测试集预测残差 KDE 密度分布", fontweight='bold')
     axes[1].set_xlabel("预测残差 ($Z_{true} - Z_{pred}$)")
     axes[1].set_ylabel("概率密度")
     axes[1].grid(True, linestyle='--', alpha=0.5)
