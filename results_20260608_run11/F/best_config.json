@@ -1,14 +1,14 @@
 {
     "lr": 0.0002,
-    "lambda_flow": 0.001,
+    "lambda_flow": 0.003,
     "lambda_geo": 5e-06,
-    "nugget_eps": 1e-07,
-    "trend_type": "quadratic",
+    "nugget_eps": 1e-08,
+    "trend_type": "constant",
     "l2_max": 0.2,
     "force_isotropic": false,
     "num_flow_layers": 8,
     "flow_hidden": 64,
-    "rff_sigma": 10.0,
+    "rff_sigma": 15.0,
     "num_samples": 400,
     "patience": 100,
     "epochs_p3": 350

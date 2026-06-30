@@ -237,21 +237,20 @@ def main():
     
     dtype = torch.float32
     
-    # 定义超参数空间并生成 HPO 专家候选 (多指标联合对齐)
+    # 定义超参数空间并生成 HPO 专家候选 (回归至常数趋势面常数均值以压制 dummy 奇异，完全关闭体积流使其退化，微调 nugget_eps 5e-6~1e-5)
     candidates = [
-        # 1. 物理对齐的常数趋势 (constant trend)，在极低 nugget_eps 配合弱正则下运行
-        {'lr': 1.5e-3, 'lambda_flow': 0.001, 'lambda_geo': 1e-05, 'nugget_eps': 1e-06, 'trend_type': 'constant', 'l2_max': 0.18, 'force_isotropic': False, 'num_samples': 400, 'patience': 180, 'epochs_p3': 200}, # 上一轮最优 R2
-        # 2. 引入 force_isotropic=True (符合场景 A 各向同性的真实物理规律)，配合更小的 nugget_eps (1e-7/1e-8/1e-9/1e-10)，用以逼近并超越 DeepKriging 的 MAE (0.4487)
-        {'lr': 1.5e-3, 'lambda_flow': 0.001, 'lambda_geo': 1e-05, 'nugget_eps': 1e-07, 'trend_type': 'constant', 'l2_max': 0.02, 'force_isotropic': True, 'num_samples': 400, 'patience': 250, 'epochs_p3': 250},
-        {'lr': 2.0e-3, 'lambda_flow': 5e-04, 'lambda_geo': 0.0, 'nugget_eps': 1e-07, 'trend_type': 'constant', 'l2_max': 0.02, 'force_isotropic': True, 'num_samples': 400, 'patience': 250, 'epochs_p3': 250},
-        {'lr': 1.5e-3, 'lambda_flow': 1e-04, 'lambda_geo': 0.0, 'nugget_eps': 1e-08, 'trend_type': 'constant', 'l2_max': 0.01, 'force_isotropic': True, 'num_samples': 400, 'patience': 250, 'epochs_p3': 250},
-        {'lr': 2.0e-3, 'lambda_flow': 5e-05, 'lambda_geo': 0.0, 'nugget_eps': 1e-08, 'trend_type': 'constant', 'l2_max': 0.01, 'force_isotropic': True, 'num_samples': 500, 'patience': 250, 'epochs_p3': 300},
-        {'lr': 2.0e-3, 'lambda_flow': 1e-05, 'lambda_geo': 0.0, 'nugget_eps': 1e-09, 'trend_type': 'constant', 'l2_max': 0.01, 'force_isotropic': True, 'num_samples': 500, 'patience': 250, 'epochs_p3': 300},
-        {'lr': 2.0e-3, 'lambda_flow': 0.0, 'lambda_geo': 0.0, 'nugget_eps': 1e-09, 'trend_type': 'constant', 'l2_max': 0.01, 'force_isotropic': True, 'num_samples': 500, 'patience': 250, 'epochs_p3': 300},
-        {'lr': 1.5e-3, 'lambda_flow': 1e-04, 'lambda_geo': 0.0, 'nugget_eps': 1e-07, 'trend_type': 'constant', 'l2_max': 0.18, 'force_isotropic': False, 'num_samples': 400, 'patience': 250, 'epochs_p3': 250},
+        {'lr': 1.5e-3, 'lambda_flow': 0.0, 'lambda_geo': 0.0, 'nugget_eps': 1e-05, 'trend_type': 'constant', 'l2_max': 0.01, 'force_isotropic': True, 'num_samples': 400, 'patience': 180, 'epochs_p3': 200},
+        {'lr': 1.5e-3, 'lambda_flow': 0.0, 'lambda_geo': 0.0, 'nugget_eps': 5e-06, 'trend_type': 'constant', 'l2_max': 0.01, 'force_isotropic': True, 'num_samples': 400, 'patience': 180, 'epochs_p3': 200},
+        {'lr': 2.0e-3, 'lambda_flow': 0.0, 'lambda_geo': 0.0, 'nugget_eps': 1e-05, 'trend_type': 'constant', 'l2_max': 0.01, 'force_isotropic': True, 'num_samples': 400, 'patience': 180, 'epochs_p3': 200},
+        {'lr': 2.0e-3, 'lambda_flow': 0.0, 'lambda_geo': 0.0, 'nugget_eps': 5e-06, 'trend_type': 'constant', 'l2_max': 0.01, 'force_isotropic': True, 'num_samples': 400, 'patience': 180, 'epochs_p3': 200},
+        {'lr': 1.0e-3, 'lambda_flow': 0.0, 'lambda_geo': 0.0, 'nugget_eps': 1e-05, 'trend_type': 'constant', 'l2_max': 0.01, 'force_isotropic': True, 'num_samples': 400, 'patience': 180, 'epochs_p3': 200},
+        {'lr': 1.5e-3, 'lambda_flow': 1e-06, 'lambda_geo': 0.0, 'nugget_eps': 1e-05, 'trend_type': 'constant', 'l2_max': 0.01, 'force_isotropic': True, 'num_samples': 400, 'patience': 180, 'epochs_p3': 200},
     ]
+
+
+
     
-    print(f"Start HPO Tuning for Scenario A (constant trend). Total candidates: {len(candidates)}")
+    print(f"Start HPO Tuning for Scenario A (dynamic trend). Total candidates: {len(candidates)}")
     
     best_score = -999.0
     best_r2 = -2.0

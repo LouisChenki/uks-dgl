@@ -127,7 +127,9 @@ def compute_uks_likelihood(C, F, Y, eps=1e-5):
 
     # 7. 汇总单样本 UKS 对数似然损失，并在 Batch 维度求均值
     loss_uks = 0.5 * (quadratic_form + log_det_C)  # [B]
-    return torch.mean(loss_uks)
+    loss_uks_mean = torch.mean(loss_uks)
+    # 防御性非负与上限裁剪，彻底阻断负损失同方差加权退化陷阱与数值奇异爆炸
+    return torch.clamp(loss_uks_mean, min=0.0, max=50.0)
 
 
 def get_curriculum_loss_mask(epoch, switch_epoch=120):

@@ -16,8 +16,8 @@ from uks_solver import UKSSolverOp
 FLOW_HIDDEN_DIM = 32
 KERNEL_HIDDEN_DIM = 32
 DROPOUT_P = 0.05
-NUGGET_EPS = 1.0e-06
-L2_MAX_LIMIT = 0.08
+NUGGET_EPS = 1.0e-07
+L2_MAX_LIMIT = 0.20
 # ==========================================
 
 class CouplingLayer(nn.Module):
@@ -347,9 +347,10 @@ class UKSModel(nn.Module):
     def get_single_trend_matrix(self, coords):
         """
         计算单通道坐标设计基底：支持常数、线性或二阶平面多项式趋势面 (Dimension dynamic)
+        使用去中心化坐标 (u - 0.5) 彻底消除常数项与线性/二次项的共线性，极大改善求解条件数与数值稳定性。
         """
-        u_x = coords[:, :, 0:1]      # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
-        u_y = coords[:, :, 1:2]      # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
+        u_x = coords[:, :, 0:1] - 0.5      # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
+        u_y = coords[:, :, 1:2] - 0.5      # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
         ones = torch.ones_like(u_x)  # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
         
         trend_t = getattr(self, 'trend_type', 'quadratic')
@@ -359,9 +360,9 @@ class UKSModel(nn.Module):
             return torch.cat([ones, u_x, u_y], dim=-1)  # [B, N, 3] -> [B, N, 3] 维度追踪 (Dimension Tracking)
         else:
             # 引入二阶项以应对非线性大尺度起伏趋势，解耦更平滑
-            u_xx = coords[:, :, 0:1] ** 2  # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
-            u_yy = coords[:, :, 1:2] ** 2  # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
-            u_xy = coords[:, :, 0:1] * coords[:, :, 1:2]  # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
+            u_xx = u_x ** 2  # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
+            u_yy = u_y ** 2  # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
+            u_xy = u_x * u_y  # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
             
             F_0 = torch.cat([ones, u_x, u_y, u_xx, u_yy, u_xy], dim=-1)  # [B, N, 6] -> [B, N, 6] 维度追踪 (Dimension Tracking)
             return F_0
