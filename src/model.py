@@ -94,31 +94,42 @@ class RealNVP(nn.Module):
     """
     可逆实值非体积保持流网络 (RealNVP)。
     通过堆叠多个耦合层，实现任意复杂概率分布到标准高斯分布之间的双射映射。
+    对于 1 维输入，退化为可学习的线性尺度-平移变换，以确保解析可逆性与数值稳定。
     """
     def __init__(self, dim=2, hidden_dim=32, num_layers=4):
         super().__init__()
         self.dim = dim
-        self.layers = nn.ModuleList()
-        # 交替使用奇偶遮罩 (Alternating Mask Types)
-        for i in range(num_layers):
-            mask_type = 'even' if i % 2 == 0 else 'odd'
-            self.layers.append(CouplingLayer(dim, hidden_dim, mask_type))
+        if dim > 1:
+            self.layers = nn.ModuleList()
+            for i in range(num_layers):
+                mask_type = 'even' if i % 2 == 0 else 'odd'
+                self.layers.append(CouplingLayer(dim, hidden_dim, mask_type))
+        else:
+            self.log_scale = nn.Parameter(torch.zeros(1))
+            self.shift = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
-        # x 形状为 [B, N, dim]
-        log_det_total = torch.zeros(x.shape[:-1], device=x.device, dtype=torch.float32)
-        out = x
-        for layer in self.layers:
-            out, log_det = layer(out)
-            log_det_total += log_det
-        return out, log_det_total
+        if self.dim > 1:
+            log_det_total = torch.zeros(x.shape[:-1], device=x.device, dtype=torch.float32)
+            out = x
+            for layer in self.layers:
+                out, log_det = layer(out)
+                log_det_total += log_det
+            return out, log_det_total
+        else:
+            y = x * torch.exp(self.log_scale) + self.shift
+            log_det_total = self.log_scale.expand(x.shape[:-1])
+            return y, log_det_total
 
     def inverse(self, y):
-        # y 形状为 [B, N, dim] 或 [B, M_mc, dim]
-        out = y
-        for layer in reversed(self.layers):
-            out = layer.inverse(out)
-        return out
+        if self.dim > 1:
+            out = y
+            for layer in reversed(self.layers):
+                out = layer.inverse(out)
+            return out
+        else:
+            x = (y - self.shift) * torch.exp(-self.log_scale)
+            return x
 
 
 class SpectralCoordinateEmbedding(nn.Module):
@@ -261,12 +272,12 @@ class AdaptiveKernelNetwork(nn.Module):
         计算多变量分块互协方差矩阵 C [B, Nq, Nq] 与预测点互协方差向量 c_0 [B, Nq, q]。
         """
         B, N, _ = H_obs.shape
+        M_pred = U_pred.shape[1]  # 预测点数量
         q = self.q
         
         # 1. 初始化各分块
-        # 对于 q=2，分块元素 C_uv 为 [B, N, N]
         C_blocks = [[torch.zeros(B, N, N, device=U_obs.device) for _ in range(q)] for _ in range(q)]
-        c0_blocks = [[torch.zeros(B, N, 1, device=U_obs.device) for _ in range(q)] for _ in range(q)]
+        c0_blocks = [[torch.zeros(B, N, M_pred, device=U_obs.device) for _ in range(q)] for _ in range(q)]
         
         # 2. 遍历 Head 累加自相关与互相关特征
         for h in range(self.num_heads):
@@ -281,13 +292,13 @@ class AdaptiveKernelNetwork(nn.Module):
             K_C = torch.exp(-0.5 * dist_sq_C)  # 空间自相关矩阵 [B, N, N]
             
             # 2.2 计算已知与预测点间对称距离平方 dist_sq_c0
-            coords_diff_c0 = U_obs.unsqueeze(2) - U_pred.unsqueeze(1)  # [B, N, 1, 2]
+            coords_diff_c0 = U_obs.unsqueeze(2) - U_pred.unsqueeze(1)  # [B, N, 1, 2] -> [B, N, M, 2] 维度追踪
             temp_diff_c0_obs = torch.einsum('bijk,bikm->bijm', coords_diff_c0, G_obs)
             dist_sq_c0_obs = torch.sum(coords_diff_c0 * temp_diff_c0_obs, dim=-1)
-            temp_diff_c0_pred = torch.einsum('bijk,bikm->bijm', coords_diff_c0, G_pred.expand(-1, N, -1, -1))
+            temp_diff_c0_pred = torch.einsum('bijk,bjkm->bijm', coords_diff_c0, G_pred)
             dist_sq_c0_pred = torch.sum(coords_diff_c0 * temp_diff_c0_pred, dim=-1)
-            dist_sq_c0 = 0.5 * (dist_sq_c0_obs + dist_sq_c0_pred)  # [B, N, 1]
-            k_c0 = torch.exp(-0.5 * dist_sq_c0) # 空间互相关向量 [B, N, 1]
+            dist_sq_c0 = 0.5 * (dist_sq_c0_obs + dist_sq_c0_pred)  # [B, N, M] -> [B, N, M] 维度追踪
+            k_c0 = torch.exp(-0.5 * dist_sq_c0) # 空间互相关向量 [B, N, M] -> [B, N, M] 维度追踪
             
             # 2.3 提取半正定共区域化系数 B_h = W_h W_h^T
             W_h = self.W[h]  # [q, q]
@@ -344,9 +355,9 @@ class UKSModel(nn.Module):
         # 3. 双头 LMC 各向异性核
         self.kernel = AdaptiveKernelNetwork(embed_dim=embed_dim, hidden_dim=kernel_hidden_dim, num_heads=2, q=in_dim, force_isotropic=force_isotropic)
 
-    def get_single_trend_matrix(self, coords):
+    def get_single_trend_matrix(self, coords, X_cov=None):
         """
-        计算单通道坐标设计基底：支持常数、线性或二阶平面多项式趋势面 (Dimension dynamic)
+        计算单通道坐标设计基底：支持常数、线性、外部协变量或二阶平面多项式趋势面 (Dimension dynamic)
         使用去中心化坐标 (u - 0.5) 彻底消除常数项与线性/二次项的共线性，极大改善求解条件数与数值稳定性。
         """
         u_x = coords[:, :, 0:1] - 0.5      # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
@@ -358,6 +369,11 @@ class UKSModel(nn.Module):
             return ones
         elif trend_t == 'linear':
             return torch.cat([ones, u_x, u_y], dim=-1)  # [B, N, 3] -> [B, N, 3] 维度追踪 (Dimension Tracking)
+        elif trend_t == 'external':
+            if X_cov is not None:
+                return torch.cat([ones, X_cov], dim=-1)  # 拼接常数漂移与外部协变量基底
+            else:
+                return ones
         else:
             # 引入二阶项以应对非线性大尺度起伏趋势，解耦更平滑
             u_xx = u_x ** 2  # [B, N, 1] -> [B, N, 1] 维度追踪 (Dimension Tracking)
@@ -367,17 +383,24 @@ class UKSModel(nn.Module):
             F_0 = torch.cat([ones, u_x, u_y, u_xx, u_yy, u_xy], dim=-1)  # [B, N, 6] -> [B, N, 6] 维度追踪 (Dimension Tracking)
             return F_0
 
-    def get_block_trend_matrix(self, F_0):
+    def get_block_trend_matrix(self, F_0, q):
         """
-        将单通道设计矩阵 F_0 [B, N, 6] 拼装为多通道分块对角矩阵 F [B, Nq, q(L+1)] (即 B x 2N x 12)
+        将单通道设计矩阵 F_0 [B, N, L] 动态拼装为多通道分块对角矩阵 F [B, Nq, q*L]
         """
         B, N, L = F_0.shape
-        zeros = torch.zeros_like(F_0)  # [B, N, 6] -> [B, N, 6] 维度追踪 (Dimension Tracking)
-        
-        # 对于 q=2 分块对角拼接，二阶多项式特征维度 L = 6，拼接后为 12 维
-        F_row1 = torch.cat([F_0, zeros], dim=-1) # [B, N, 12] -> [B, N, 12] 维度追踪 (Dimension Tracking)
-        F_row2 = torch.cat([zeros, F_0], dim=-1) # [B, N, 12] -> [B, N, 12] 维度追踪 (Dimension Tracking)
-        F = torch.cat([F_row1, F_row2], dim=-2)  # [B, 2N, 12] -> [B, 2N, 12] 维度追踪 (Dimension Tracking)
+        if q == 1:
+            return F_0
+            
+        rows = []
+        for i in range(q):
+            row_blocks = []
+            for j in range(q):
+                if i == j:
+                    row_blocks.append(F_0)
+                else:
+                    row_blocks.append(torch.zeros_like(F_0))
+            rows.append(torch.cat(row_blocks, dim=-1))
+        F = torch.cat(rows, dim=-2)  # [B, Nq, q*L]
         return F
 
     def forward(self, Z_obs, U_obs, U_pred, X_obs, X_pred, Z_pred=None):
@@ -410,15 +433,24 @@ class UKSModel(nn.Module):
         H_pred = self.sce(U_pred)  # [B, 1, embed_dim]
         C, c_0 = self.kernel(H_obs, H_pred, U_obs, U_pred)
         
-        # 4. 拼装分块对角趋势矩阵 F [B, Nq, q(L+1)] (即 B x 2N x 12) 与 f_0 [B, q(L+1), q] (即 B x 12 x 2)
-        F_0 = self.get_single_trend_matrix(U_obs)  # [B, N, 6] -> [B, N, 6] 维度追踪 (Dimension Tracking)
-        F = self.get_block_trend_matrix(F_0)      # [B, 2*N, 12] -> [B, 2*N, 12] 维度追踪 (Dimension Tracking)
+        # 4. 拼装分块对角趋势矩阵 F 与 f_0
+        F_0 = self.get_single_trend_matrix(U_obs, X_obs)  
+        F = self.get_block_trend_matrix(F_0, q)      
         
-        f0_pred = self.get_single_trend_matrix(U_pred).transpose(-2, -1)  # [B, 6, 1] -> [B, 6, 1] 维度追踪 (Dimension Tracking)
-        zeros_pred = torch.zeros_like(f0_pred)  # [B, 6, 1] -> [B, 6, 1] 维度追踪 (Dimension Tracking)
-        f_row1 = torch.cat([f0_pred, zeros_pred], dim=-1) # [B, 6, 2] -> [B, 6, 2] 维度追踪 (Dimension Tracking)
-        f_row2 = torch.cat([zeros_pred, f0_pred], dim=-1) # [B, 6, 2] -> [B, 6, 2] 维度追踪 (Dimension Tracking)
-        f_0 = torch.cat([f_row1, f_row2], dim=-2)         # [B, 12, 2] -> [B, 12, 2] 维度追踪 (Dimension Tracking)
+        f0_pred = self.get_single_trend_matrix(U_pred, X_pred).transpose(-2, -1)  # [B, L, 1]
+        if q == 1:
+            f_0 = f0_pred
+        else:
+            f_rows = []
+            for i in range(q):
+                f_row_blocks = []
+                for j in range(q):
+                    if i == j:
+                        f_row_blocks.append(f0_pred)
+                    else:
+                        f_row_blocks.append(torch.zeros_like(f0_pred))
+                f_rows.append(torch.cat(f_row_blocks, dim=-1))
+            f_0 = torch.cat(f_rows, dim=-2)  # [B, q*L, q]
         
         # 5. 调用可微求解器，求解多通道插值权重与估计值
         # 返回多通道联合预测值 Y_hat_stacked: [B, q, 1]
@@ -450,14 +482,23 @@ class UKSModel(nn.Module):
         H_pred = self.sce(U_pred)
         C, c_0 = self.kernel(H_obs, H_pred, U_obs, U_pred)  # C: [B, 2N, 2N], c_0: [B, 2N, 2]
         
-        F_0 = self.get_single_trend_matrix(U_obs)  # [B, N, 6] -> [B, N, 6] 维度追踪 (Dimension Tracking)
-        F = self.get_block_trend_matrix(F_0)  # [B, 2*N, 12] -> [B, 2*N, 12] 维度追踪 (Dimension Tracking)
+        F_0 = self.get_single_trend_matrix(U_obs, X_obs)  
+        F = self.get_block_trend_matrix(F_0, q)  
         
-        f0_pred = self.get_single_trend_matrix(U_pred).transpose(-2, -1)  # [B, 6, 1] -> [B, 6, 1] 维度追踪 (Dimension Tracking)
-        zeros_pred = torch.zeros_like(f0_pred)  # [B, 6, 1] -> [B, 6, 1] 维度追踪 (Dimension Tracking)
-        f_row1 = torch.cat([f0_pred, zeros_pred], dim=-1)  # [B, 6, 2] -> [B, 6, 2] 维度追踪 (Dimension Tracking)
-        f_row2 = torch.cat([zeros_pred, f0_pred], dim=-1)  # [B, 6, 2] -> [B, 6, 2] 维度追踪 (Dimension Tracking)
-        f_0 = torch.cat([f_row1, f_row2], dim=-2)  # [B, 12, 2] -> [B, 12, 2] 维度追踪 (Dimension Tracking)
+        f0_pred = self.get_single_trend_matrix(U_pred, X_pred).transpose(-2, -1)  # [B, L, 1]
+        if q == 1:
+            f_0 = f0_pred
+        else:
+            f_rows = []
+            for i in range(q):
+                f_row_blocks = []
+                for j in range(q):
+                    if i == j:
+                        f_row_blocks.append(f0_pred)
+                    else:
+                        f_row_blocks.append(torch.zeros_like(f0_pred))
+                f_rows.append(torch.cat(f_row_blocks, dim=-1))
+            f_0 = torch.cat(f_rows, dim=-2)  # [B, q*L, q]
         
         # 3. 求解潜空间均值预测
         Y_hat_stacked = UKSSolverOp.apply(C, F, c_0, f_0, Y_stacked, self.eps) # [B, 2, 1]

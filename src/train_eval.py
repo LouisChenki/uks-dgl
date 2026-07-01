@@ -176,9 +176,8 @@ def compute_joint_losses(
     H_pred_eval = model.sce(U_pred)  # [B, 1, embed_dim]
     C, _ = model.kernel(H_obs, H_pred_eval, U_obs, U_pred)  # C: [B, Nq, Nq]
     
-    # 拼接多通道设计矩阵
-    F_0 = model.get_single_trend_matrix(U_obs)
-    F = model.get_block_trend_matrix(F_0)  # [B, Nq, q(L+1)]
+    F_0 = model.get_single_trend_matrix(U_obs, X_obs)
+    F = model.get_block_trend_matrix(F_0, q)  # [B, Nq, q*L]
     
     # 高斯隐变量的观测部分 Y_obs_flow 并堆叠为列向量
     Y_obs_flow = Y_all_flow[:, :N, :]  # [B, N, q]

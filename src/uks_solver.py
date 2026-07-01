@@ -43,32 +43,41 @@ class UKSSolverOp(torch.autograd.Function):
         C_reg = C + eps * eye_N  # [B, N, N]
 
         # 2. 对对称正定矩阵 C_reg 进行 Cholesky 分解：C_reg = L L^T
-        # 规避 MPS Cholesky Bug: 临时移动到 CPU 上分解，并在失败时采取迭代自适应加噪防护
-        C_reg_cpu = C_reg.cpu()
-        try:
-            L_cpu = torch.linalg.cholesky(C_reg_cpu)
-        except torch._C._LinAlgError:
-            fallback_nugget = 1e-4
-            L_cpu = None
-            eye_N_cpu = torch.eye(N, device='cpu', dtype=torch.float32).unsqueeze(0) # [1, N, N]
-            for _ in range(10):
-                try:
-                    L_cpu = torch.linalg.cholesky(C_reg_cpu + fallback_nugget * eye_N_cpu)
-                    break
-                except torch._C._LinAlgError:
-                    fallback_nugget *= 5.0
-            if L_cpu is None:
-                has_nan = torch.isnan(C_reg_cpu).any().item()
-                has_inf = torch.isinf(C_reg_cpu).any().item()
-                diagonal_min = torch.diagonal(C_reg_cpu, dim1=-2, dim2=-1).min().item()
-                print(f"[ERROR DIAGNOSTICS] C_reg_cpu Has NaN: {has_nan}, Has Inf: {has_inf}, Diagonal Min: {diagonal_min}")
-                print(f"[ERROR DIAGNOSTICS] C_reg_cpu[0]: {C_reg_cpu[0]}")
-                eigvals = torch.linalg.eigvalsh(C_reg_cpu)
-                print(f"[ERROR DIAGNOSTICS] Min Eigenvalue: {eigvals.min().item()}, Max Eigenvalue: {eigvals.max().item()}")
-                print(f"[ERROR DIAGNOSTICS] Eigenvalues[0]: {eigvals[0]}")
-                raise torch._C._LinAlgError("Cholesky decomposition of C_reg failed even with 10 adaptive fallback attempts.")
-
-        L = L_cpu.to(C.device)  # [B, N, N]
+        # CUDA 设备下直接在 GPU 显存内极速求解，避免主机-设备拷贝开销
+        device = C_reg.device
+        if 'cuda' in str(device):
+            try:
+                L = torch.linalg.cholesky(C_reg)
+            except torch._C._LinAlgError:
+                fallback_nugget = 1e-4
+                L = None
+                eye_N_cuda = torch.eye(N, device=device, dtype=torch.float32).unsqueeze(0)
+                for _ in range(10):
+                    try:
+                        L = torch.linalg.cholesky(C_reg + fallback_nugget * eye_N_cuda)
+                        break
+                    except torch._C._LinAlgError:
+                        fallback_nugget *= 5.0
+                if L is None:
+                    raise torch._C._LinAlgError("Cholesky decomposition of C_reg failed on CUDA even with 10 adaptive fallbacks.")
+        else:
+            # MPS/CPU 下临时转移至 CPU 规避 Apple Silicon MPS 底层 linalg bug
+            C_reg_cpu = C_reg.cpu()
+            try:
+                L_cpu = torch.linalg.cholesky(C_reg_cpu)
+            except torch._C._LinAlgError:
+                fallback_nugget = 1e-4
+                L_cpu = None
+                eye_N_cpu = torch.eye(N, device='cpu', dtype=torch.float32).unsqueeze(0)
+                for _ in range(10):
+                    try:
+                        L_cpu = torch.linalg.cholesky(C_reg_cpu + fallback_nugget * eye_N_cpu)
+                        break
+                    except torch._C._LinAlgError:
+                        fallback_nugget *= 5.0
+                if L_cpu is None:
+                    raise torch._C._LinAlgError("Cholesky decomposition of C_reg failed on CPU even with 10 adaptive fallbacks.")
+            L = L_cpu.to(device)  # [B, N, N]
 
         # 3. 求解 L V = F (得到 V) 以及 L v_0 = c_0 (得到 v_0)
         V = torch.linalg.solve_triangular(L, F, upper=False)  # [B, N, M]
@@ -83,24 +92,40 @@ class UKSSolverOp(torch.autograd.Function):
         eye_M = torch.eye(M, device=C.device, dtype=torch.float32).unsqueeze(0)
         V_T_V_reg = V_T_V + 1e-6 * eye_M  # [B, M, M]
         
-        # 同样在 CPU 上对 V^T V 进行 Cholesky，带迭代加噪防护
-        V_T_V_reg_cpu = V_T_V_reg.cpu()
-        try:
-            L_V_cpu = torch.linalg.cholesky(V_T_V_reg_cpu)
-        except torch._C._LinAlgError:
-            fallback_nugget = 1e-4
-            L_V_cpu = None
-            eye_M_cpu = torch.eye(M, device='cpu', dtype=torch.float32).unsqueeze(0) # [1, M, M]
-            while fallback_nugget <= 0.5:
-                try:
-                    L_V_cpu = torch.linalg.cholesky(V_T_V_reg_cpu + fallback_nugget * eye_M_cpu)
-                    break
-                except torch._C._LinAlgError:
-                    fallback_nugget *= 5
-            if L_V_cpu is None:
-                raise torch._C._LinAlgError("Cholesky decomposition of V^T V failed even with adaptive fallbacks.")
-            
-        L_V = L_V_cpu.to(C.device)  # [B, M, M]
+        # CUDA/MPS 设备自适应分解
+        if 'cuda' in str(device):
+            try:
+                L_V = torch.linalg.cholesky(V_T_V_reg)
+            except torch._C._LinAlgError:
+                fallback_nugget = 1e-4
+                L_V = None
+                eye_M_cuda = torch.eye(M, device=device, dtype=torch.float32).unsqueeze(0)
+                while fallback_nugget <= 0.5:
+                    try:
+                        L_V = torch.linalg.cholesky(V_T_V_reg + fallback_nugget * eye_M_cuda)
+                        break
+                    except torch._C._LinAlgError:
+                        fallback_nugget *= 5
+                if L_V is None:
+                    raise torch._C._LinAlgError("Cholesky decomposition of V^T V failed on CUDA even with adaptive fallbacks.")
+        else:
+            # 同样在 CPU 上对 V^T V 进行 Cholesky，带迭代加噪防护
+            V_T_V_reg_cpu = V_T_V_reg.cpu()
+            try:
+                L_V_cpu = torch.linalg.cholesky(V_T_V_reg_cpu)
+            except torch._C._LinAlgError:
+                fallback_nugget = 1e-4
+                L_V_cpu = None
+                eye_M_cpu = torch.eye(M, device='cpu', dtype=torch.float32).unsqueeze(0) # [1, M, M]
+                while fallback_nugget <= 0.5:
+                    try:
+                        L_V_cpu = torch.linalg.cholesky(V_T_V_reg_cpu + fallback_nugget * eye_M_cpu)
+                        break
+                    except torch._C._LinAlgError:
+                        fallback_nugget *= 5
+                if L_V_cpu is None:
+                    raise torch._C._LinAlgError("Cholesky decomposition of V^T V failed even with adaptive fallbacks.")
+            L_V = L_V_cpu.to(device)  # [B, M, M]
         
         # 右端项 rhs_mu = V^T v_0 - f_0
         # [B, M, N] x [B, N, 1] -> [B, M, 1]
