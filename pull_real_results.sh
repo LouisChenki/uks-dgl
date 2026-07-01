@@ -21,10 +21,10 @@ expect -c "
     expect eof
 "
 
-if [ -d "${LOCAL_DIR}_temp/results_real" ]; then
+if [ -d "${LOCAL_DIR}_temp/meuse" ] || [ -d "${LOCAL_DIR}_temp/california" ]; then
     # 规避 scp 创建多层嵌套目录，进行物理规整
     mkdir -p ${LOCAL_DIR}
-    cp -r ${LOCAL_DIR}_temp/results_real/* ${LOCAL_DIR}/
+    cp -r ${LOCAL_DIR}_temp/* ${LOCAL_DIR}/
     rm -rf ${LOCAL_DIR}_temp
     echo "=== [2/2] 真实数据成果已完美同步至本地 ${LOCAL_DIR}/ ！ ==="
 else

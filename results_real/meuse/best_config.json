@@ -1,8 +1,11 @@
 {
-    "lr": 0.0018189385384706645,
-    "lambda_flow": 0.0006246357851257902,
-    "lambda_geo": 4.7668443679442034e-05,
-    "nugget_eps": 8.61326326516279e-06,
-    "flow_hidden": 32,
-    "num_flow_layers": 4
+    "lr": 0.0020842459132540073,
+    "lambda_flow": 0.003232037279837365,
+    "lambda_geo": 3.2529315406618557e-06,
+    "nugget_eps": 0.0007343556321476179,
+    "flow_hidden": 64,
+    "num_flow_layers": 2,
+    "rff_sigma": 9.375066786966311,
+    "latent_dim": 8,
+    "embed_dim": 16
 }

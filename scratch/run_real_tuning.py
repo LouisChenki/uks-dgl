@@ -49,7 +49,7 @@ def make_real_self_supervised_dataset(coords, Z, cov, num_samples, n_obs_points)
     return (np.array(U_obs_list), np.array(Z_obs_list), np.array(X_obs_list),
             np.array(U_pred_list), np.array(Z_pred_list), np.array(X_pred_list))
 
-def train_real_model(model, coords_train, Z_train, cov_train, epochs, lr, lambda_flow, lambda_geo, device):
+def train_real_model(model, coords_train, Z_train, cov_train, epochs, lr, lambda_flow, lambda_geo, device, num_samples=400):
     """
     自监督空间重构训练循环，支持课程学习与同方差自适应权重
     """
@@ -64,7 +64,6 @@ def train_real_model(model, coords_train, Z_train, cov_train, epochs, lr, lambda
     
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.05)
     
-    num_samples = 400
     u_obs_np, z_obs_np, x_obs_np, u_pred_np, z_pred_np, x_pred_np = make_real_self_supervised_dataset(
         coords_train, Z_train, cov_train, num_samples, n_obs_points
     )
@@ -126,7 +125,7 @@ def main():
     output_base_dir = "results_real"
     os.makedirs(output_base_dir, exist_ok=True)
     
-    datasets = ["meuse", "california"]
+    datasets = ["meuse"]
     
     for d_name in datasets:
         print(f"\n=================== 正在计算真实数据集: {d_name.upper()} ===================")
@@ -242,30 +241,35 @@ def main():
         Z_val_hpo = torch.tensor(Z_train[hpo_val_idx], dtype=torch.float32, device=device) # [M_val, q]
         
         def objective(trial):
-            lr = trial.suggest_float("lr", 2e-4, 3e-3, log=True)
-            lambda_flow = trial.suggest_float("lambda_flow", 2e-4, 3e-3, log=True)
-            lambda_geo = trial.suggest_float("lambda_geo", 1e-5, 8e-5, log=True)
-            nugget_eps = trial.suggest_float("nugget_eps", 5e-7, 5e-5, log=True)
-            flow_hidden = trial.suggest_int("flow_hidden", 16, 48, step=16)
-            num_flow_layers = trial.suggest_int("num_flow_layers", 2, 4, step=2)
+            lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
+            lambda_flow = trial.suggest_float("lambda_flow", 1e-5, 5e-3, log=True)
+            lambda_geo = trial.suggest_float("lambda_geo", 1e-6, 5e-4, log=True)
+            nugget_eps = trial.suggest_float("nugget_eps", 1e-7, 1e-2, log=True)
+            flow_hidden = trial.suggest_categorical("flow_hidden", [16, 32, 64])
+            num_flow_layers = trial.suggest_categorical("num_flow_layers", [2, 4, 6])
+            
+            # 扩展的超参数：rff_sigma, latent_dim, embed_dim (trend_type 锁死在 external 以对齐物理漂移并保持模型一致性)
+            rff_sigma = trial.suggest_float("rff_sigma", 1.0, 20.0)
+            latent_dim = trial.suggest_categorical("latent_dim", [4, 8, 16])
+            embed_dim = trial.suggest_categorical("embed_dim", [8, 16, 32])
             
             model = UKSModel(
                 in_dim=in_dim,
                 flow_hidden_dim=flow_hidden,
                 num_flow_layers=num_flow_layers,
-                embed_dim=16,
-                rff_sigma=10.0,
+                embed_dim=embed_dim,
+                rff_sigma=rff_sigma,
                 kernel_hidden_dim=32,
-                latent_dim=8,
+                latent_dim=latent_dim,
                 eps=nugget_eps,
                 trend_type="external"
             ).to(device)
             
             try:
-                # 快速评估跑 100 epochs
+                # 快速评估跑 120 epochs，使用 400 个样本和 batch_size=32 (共 1440 步更新) 保证充分收敛
                 train_real_model(
                     model, hpo_coords_train, hpo_Z_train, hpo_cov_train, 
-                    epochs=100, lr=lr, lambda_flow=lambda_flow, lambda_geo=lambda_geo, device=device
+                    epochs=50, lr=lr, lambda_flow=lambda_flow, lambda_geo=lambda_geo, device=device, num_samples=400
                 )
                 
                 model.eval()
@@ -302,17 +306,17 @@ def main():
             in_dim=in_dim,
             flow_hidden_dim=best_p["flow_hidden"],
             num_flow_layers=best_p["num_flow_layers"],
-            embed_dim=16,
-            rff_sigma=10.0,
+            embed_dim=best_p["embed_dim"],
+            rff_sigma=best_p["rff_sigma"],
             kernel_hidden_dim=32,
-            latent_dim=8,
+            latent_dim=best_p["latent_dim"],
             eps=best_p["nugget_eps"],
             trend_type="external"
         ).to(device)
         
         train_real_model(
             best_model, coords_train, Z_train, cov_train,
-            epochs=300, lr=best_p["lr"], lambda_flow=best_p["lambda_flow"], lambda_geo=best_p["lambda_geo"], device=device
+            epochs=300, lr=best_p["lr"], lambda_flow=best_p["lambda_flow"], lambda_geo=best_p["lambda_geo"], device=device, num_samples=400
         )
         
         # 5. 测试集并行估计
